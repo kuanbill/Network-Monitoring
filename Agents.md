@@ -6,7 +6,7 @@
 
 目前管理端已部署在本機 Docker Desktop，專案目錄為 `E:\netword`，網址為 **http://127.0.0.1:8080**。原本直接執行的 Python 管理程序已停止，請勿同時啟動兩個管理程序共用設定檔。
 
-目前四台主機均已部署 Agent，完成連線驗證：
+目前五台主機均已部署 Agent，各台已完成連線驗證：
 
 | IP | 系統／主機名稱 | 管理帳號 | Agent 服務檢查 |
 | --- | --- | --- | --- |
@@ -14,6 +14,7 @@
 | 192.168.6.23 | Linux／la-ubuntu-server | landagent | ssh |
 | 192.168.6.44 | Linux／landagent-ubuntu | landagent | ssh |
 | 192.168.6.218 | Windows Server 2022／win2022-server | markkuan | sshd |
+| 192.168.6.212 | Linux／ur-webserver | uradmin | ssh |
 
 狀態可能隨實際網路與主機運作改變，表格不是即時健康保證。
 
@@ -94,7 +95,7 @@ docker compose down
 - 磁碟卡片顯示最高使用率與對應掛載點；完整磁碟清單在主機詳情。
 - 無 Agent 資料時顯示缺值，不可當成 0%；服務 `unknown` 與已確認失敗使用不同呈現。
 - 全螢幕總覽進入時清除搜尋與狀態篩選，以免漏掉正常主機。四台桌面 2×2 已驗證可在 1366×768 顯示。
-- 手機使用單欄；更多主機或大量服務可能需要捲動，不能宣稱任意數量都可單屏呈現。
+- 手機使用單欄；更多主機或大量服務可能需要捲動，不能宣稱任意數量都可單屏呈現。目前已增加至五台，現有桌面兩欄配置會增加第三列，原先四台 2×2 單屏驗證不代表五台仍可單屏顯示。
 - 保留原本清單、主機詳情、搜尋與篩選。連線失敗時需顯示資料可能過期的警告，包含全螢幕模式。
 - 所有 API 文字使用 DOM `textContent` 或安全屬性，不使用未過濾的 HTML 插入。
 
@@ -104,20 +105,33 @@ docker compose down
 
 ### Linux
 
-安裝位置：`/home/landagent/netword-agent`。Token 位於 `agent.env`，權限 600，目錄 700。
+安裝位置：兩台 `landagent` 主機為 `/home/landagent/netword-agent`；`uradmin@192.168.6.212` 為 `/home/uradmin/netword-agent`。Token 位於各自的 `agent.env`，權限 600，目錄 700。
 
-使用者 systemd 單元：`~/.config/systemd/user/netword-agent.service`。兩台均已開啟 Linger，以支援未登入時運行。
+使用者 systemd 單元：`~/.config/systemd/user/netword-agent.service`。三台均已開啟 Linger，以支援未登入時運行。維護指令須以該服務所屬帳號執行。
 
 ```bash
 systemctl --user status netword-agent.service
 systemctl --user restart netword-agent.service
 journalctl --user -u netword-agent.service -n 50 --no-pager
-loginctl show-user landagent -p Linger
+loginctl show-user "$(id -un)" -p Linger
 ```
 
-`192.168.6.44` 的 UFW 已由使用者允許管理端連入 9105；`192.168.6.23` 部署時 UFW 未啟用，未擅自改為啟用。
+`192.168.6.44`、`192.168.6.212` 的 UFW 已由使用者允許管理端連入 9105；`192.168.6.23` 部署時 UFW 未啟用，未擅自改為啟用。最小範圍規則為：
 
-`192.168.6.23` 的系統 Python 缺少 ensurepip／pip，使用 `venv --without-pip` 搭配官方 pip wheel 完成隔離環境安裝，未修改系統 Python。日後重建環境應先檢查 venv 與 pip 可用性。
+```bash
+sudo ufw allow from 192.168.6.6 to any port 9105 proto tcp
+```
+
+`192.168.6.23` 缺少可用 ensurepip／pip；`192.168.6.212` 沒有系統 pip。兩台均使用 `venv --without-pip` 搭配官方 pip wheel 完成隔離環境安裝，未修改系統 Python。日後重建環境應先檢查 venv 與 pip 可用性。
+
+### 新增 uradmin@192.168.6.212 的部署紀錄
+
+- 主機名稱 `ur-webserver`，Linux，系統 Python `3.12.3`；隔離環境安裝 psutil `7.2.2`。
+- Agent 啟動參數：`--bind 192.168.6.212 --port 9105 --allow-ip 192.168.6.6 --services ssh`。
+- 使用者服務已 enable 並運行，`Linger=yes`；失敗自動重啟，`NoNewPrivileges=true`、`UMask=0077`。
+- 已更新 Docker 管理端中該 IP 的主機設定，保留原有名稱與服務檢查，啟用 Agent 並設定獨立 Token；未將 Token 記入文件或 Git。
+- 初次連線因 UFW 阻擋而逾時；使用者放行上述規則後，已透過管理端 `/api/state` 確認 `status=up`、`agent.ok=true`。
+- 驗證當下 CPU `0.0%`、記憶體 `12.4%`、SSH `active`。數值僅為當次紀錄，最新指標以網頁為準。
 
 ### Windows
 
