@@ -1,0 +1,2 @@
+# Optional dependency for agent.py only (not required by the backend).
+psutil>=6,<8

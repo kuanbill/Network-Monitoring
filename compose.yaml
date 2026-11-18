@@ -1,0 +1,25 @@
+name: netword
+services:
+  monitor:
+    build: .
+    image: netword-monitor:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

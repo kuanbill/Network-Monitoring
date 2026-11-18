@@ -1,0 +1,145 @@
+// Optional real-browser smoke test. Node 22+, Chrome or Edge; no npm dependencies.
+// Run from project root: node tests/browser_smoke.mjs
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, writeFile, rm, access } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { createServer } from 'node:net';
+import assert from 'node:assert/strict';
+
+const delay = ms => new Promise(r => setTimeout(r, ms));
+async function until(fn, label, timeout = 20000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try { const result = await fn(); if (result) return result; } catch {}
+    await delay(150);
+  }
+  throw new Error(`Timed out: ${label}`);
+}
+const candidates = [process.env.CHROME_PATH, 'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean);
+let executable;
+for (const candidate of candidates) { try { await access(candidate); executable = candidate; break; } catch {} }
+if (!executable) throw new Error('Set CHROME_PATH to Chrome / Edge executable');
+const temporary = await mkdtemp(join(tmpdir(), 'netword-browser-'));
+const listener = createServer();
+await new Promise(r => listener.listen(0, '127.0.0.1', r));
+const port = listener.address().port;
+await new Promise(r => listener.close(r));
+const base = `http://127.0.0.1:${port}`;
+let backend, browser, socket;
+let nextId = 0;
+const pending = new Map();
+const errors = [];
+async function command(method, params = {}) {
+  const id = ++nextId;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout ${method}`)); }, 15000);
+    pending.set(id, { resolve: result => { clearTimeout(timeout); resolve(result); }, reject });
+    socket.send(JSON.stringify({ id, method, params }));
+  });
+}
+async function evaluate(expression) {
+  const result = await command('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+  return result.result.value;
+}
+try {
+  backend = spawn(process.env.PYTHON || 'python', ['server.py', '--port', String(port), '--data-dir', join(temporary, 'data')], { cwd: resolve('.'), stdio: 'ignore' });
+  backend.on('error', error => errors.push(String(error)));
+  await until(async () => (await fetch(base + '/api/state')).ok, 'backend');
+  browser = spawn(executable, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${join(temporary, 'profile')}`, base], { stdio: 'ignore' });
+  browser.on('error', error => errors.push(String(error)));
+  const debugPort = await until(async () => (await readFile(join(temporary, 'profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0], 'browser debugger');
+  const page = await until(async () => (await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json()).find(p => p.type === 'page' && p.url.startsWith(base)), 'page target');
+  socket = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
+  socket.onmessage = event => {
+    const data = JSON.parse(event.data);
+    if (data.id && pending.has(data.id)) {
+      const item = pending.get(data.id); pending.delete(data.id);
+      if (data.error) item.reject(new Error(JSON.stringify(data.error))); else item.resolve(data.result);
+    }
+    if (data.method === 'Runtime.exceptionThrown') errors.push(JSON.stringify(data.params.exceptionDetails));
+    if (data.method === 'Log.entryAdded' && data.params.entry.level === 'error' && !data.params.entry.url?.endsWith('/favicon.ico')) errors.push(data.params.entry.text);
+  };
+  await command('Runtime.enable');
+  await command('Log.enable');
+  await until(() => evaluate(`document.querySelector('#connection-text').textContent.includes('已連') || document.querySelector('#last-sync').textContent !== '尚未同步'`), 'initial state');
+  await evaluate(`document.querySelector('#add-host').click(); document.querySelector('#host-ip').value='127.0.0.1'; document.querySelector('#host-name').value='Browser smoke <test>'; document.querySelector('#host-ports').value='${port}'; document.querySelector('#host-form').requestSubmit()`);
+  await until(async () => (await (await fetch(base + '/api/state')).json()).hosts.length === 1, 'add host');
+  await until(() => evaluate(`document.querySelector('#host-rows').textContent.includes('Browser smoke <test>')`), 'host table');
+  assert.equal(await evaluate(`document.querySelectorAll('#host-rows test').length`), 0, 'host text must not become HTML');
+  await evaluate(`document.querySelector('#open-scan').click(); document.querySelector('#scan-range').value='127.0.0.1/32'; document.querySelector('#scan-ports').value='${port}'; document.querySelector('#scan-form').requestSubmit()`);
+  await until(async () => { const scan = await (await fetch(base + '/api/scan')).json(); return !scan.running && scan.progress === 1; }, 'scan');
+  await until(() => evaluate(`document.querySelector('#scan-rows').textContent.includes('127.0.0.1')`), 'scan table');
+  await evaluate(`document.querySelector('#scan-dialog').close()`);
+  // Click the row's detail button (or row itself for keyboard-enabled row layouts).
+  await evaluate(`(document.querySelector('#host-rows button') || document.querySelector('#host-rows tr')).click()`);
+  await until(() => evaluate(`document.querySelector('#detail-dialog').open`), 'host details');
+  assert.ok(await evaluate(`document.querySelector('#detail-content').textContent.length > 20`));
+  await evaluate(`window.confirm=()=>true; document.querySelector('#delete-host').click()`);
+  await until(async () => (await (await fetch(base + '/api/state')).json()).hosts.length === 0, 'delete host');
+  await until(() => evaluate(`!document.querySelector('#detail-dialog').open && document.querySelector('#host-rows').children.length===0`), 'delete rendered');
+  await evaluate(`document.querySelector('#open-scan').click()`);
+  await until(() => evaluate(`!document.querySelector('#scan-select-all').disabled`), 'discovered host available');
+  await evaluate(`document.querySelector('#scan-select-all').click(); document.querySelector('#add-discovered').click()`);
+  await until(async () => (await (await fetch(base + '/api/state')).json()).hosts.length === 1, 'add discovered host');
+  await evaluate(`document.querySelector('#scan-dialog').close(); document.querySelector('#add-host').click()`);
+  assert.equal(await evaluate(`document.querySelector('#agent-port').value`), '9105');
+  await evaluate(`document.querySelector('#host-dialog').close()`);
+  await command('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});
+  assert.equal(await evaluate(`document.documentElement.scrollWidth<=innerWidth`), true, 'mobile layout must fit');
+  // Keep fixture data inside this page; never modify deployed hosts or saved tokens.
+  const fixture = {interval:30, hosts:Array.from({length:4}, (_, index) => ({
+    id:`fixture-${index}`, name:`Fixture ${index}`, ip:`192.168.8.${index+1}`, agent_enabled:index!==3, history:[],
+    last:{timestamp:Date.now()/1000, status:index===2?'degraded':'up', latency_ms:1.5,
+      checks:[{type:'tcp',label:'TCP 22',ok:true}],
+      agent:{ok:index!==3, metrics:{hostname:index===0?'Host <img src=x onerror=alert(1)>':`Host ${index}`,os:index%2?'Linux':'Windows',cpu_percent:12.3,memory:{percent:45.6,used:4000000000,total:8000000000},uptime_seconds:100000,disks:[{mountpoint:'C:/',percent:67.8}],services:[{name:'ssh',status:index===2?'stopped':index===1?'unknown':'running'}]}}
+    }
+  }))};
+  await evaluate(`window.__originalFetch=window.fetch; window.__fixture=${JSON.stringify(fixture)}; window.fetch=(path,options)=>String(path)==='/api/state'?Promise.resolve(new Response(JSON.stringify(window.__fixture),{status:200})):window.__originalFetch(path,options)`);
+  await until(() => evaluate(`document.querySelectorAll('.host-card').length===4`), 'four-host metrics board');
+  assert.equal(await evaluate(`document.querySelectorAll('.host-card img').length`),0,'metrics names must remain plain text');
+  assert.ok(await evaluate(`document.querySelector('.host-card').textContent.includes('12.3%') && document.querySelector('.host-card').textContent.includes('45.6%') && document.querySelector('.host-card').textContent.includes('67.8%')`));
+  assert.ok(await evaluate(`document.querySelectorAll('.host-card')[2].querySelector('.service-chip.bad').textContent.includes('stopped')`));
+  assert.ok(await evaluate(`document.querySelectorAll('.host-card')[1].querySelector('.service-chip.unknown').textContent.includes('unknown')`));
+  assert.ok(await evaluate(`document.querySelectorAll('.host-card')[3].textContent.includes('未啟用 Agent') && !document.querySelectorAll('.host-card')[3].textContent.includes('12.3%')`));
+  assert.equal(await evaluate(`document.documentElement.scrollWidth<=innerWidth`),true,'mobile metrics board fits');
+  await command('Emulation.setDeviceMetricsOverride', {width:1366,height:768,deviceScaleFactor:1,mobile:false});
+  await evaluate(`document.querySelector('#view-toggle').click()`);
+  assert.equal(await evaluate(`document.querySelector('#host-board').hidden`),true,'list mode is available');
+  await evaluate(`document.querySelector('#wall-toggle').click()`);
+  await until(() => evaluate(`document.body.classList.contains('wall-mode') && !document.querySelector('#host-board').hidden`),'wall mode');
+  assert.equal(await evaluate(`document.documentElement.scrollWidth<=innerWidth`),true,'wall has no horizontal overflow');
+  const fit = await evaluate(`({bottom:document.querySelector('.hosts-panel').getBoundingClientRect().bottom,height:innerHeight})`);
+  assert.ok(fit.bottom <= fit.height, `All four cards must fit desktop wall: ${JSON.stringify(fit)}`);
+  if (process.env.SCREENSHOT_PATH) {
+    const shot=await command('Page.captureScreenshot',{format:'png'});
+    await writeFile(process.env.SCREENSHOT_PATH,Buffer.from(shot.data,'base64'));
+  }
+  await evaluate(`document.querySelector('[data-filter="attention"]').click()`);
+  assert.equal(await evaluate(`document.querySelectorAll('.host-card').length`),1,'status filters apply to cards');
+  await evaluate(`document.querySelector('.host-card .host-link').click()`);
+  assert.equal(await evaluate(`document.querySelector('#detail-dialog').open`),true,'board opens host detail');
+  await evaluate(`document.querySelector('#detail-dialog').close(); document.querySelector('#wall-toggle').click()`);
+  assert.equal(await evaluate(`document.body.classList.contains('wall-mode')`),false,'wall mode can be exited');
+  await evaluate(`document.querySelector('#wall-toggle').click()`);
+  await until(() => evaluate(`document.querySelectorAll('.host-card').length===4`),'fullscreen clears prior filters');
+  await evaluate(`window.fetch=()=>Promise.reject(new TypeError('simulated offline'))`);
+  await until(() => evaluate(`!document.querySelector('#state-error').hidden`),'connection failure warning');
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector('#state-error')).display!=='none'`),true,'stale-data warning remains visible in wall mode');
+  assert.deepEqual(errors, []);
+  console.log('PASS: existing host/scan workflows, metrics board, safe rendering, missing agent, service failure, filters, details, list toggle, mobile and four-host desktop wall');
+} catch (error) {
+  if (socket?.readyState === WebSocket.OPEN) {
+    try { console.error('Browser diagnostic:', await evaluate(`JSON.stringify({hostError:document.querySelector('#host-form-error').textContent,scanError:document.querySelector('#scan-error').textContent,scanStatus:document.querySelector('#scan-status').textContent,scanRange:document.querySelector('#scan-range').value,scanPorts:document.querySelector('#scan-ports').value})`)); } catch {}
+  }
+  console.error('Browser errors:', errors);
+  throw error;
+} finally {
+  if (socket?.readyState === WebSocket.OPEN) { try { await command('Browser.close'); } catch {} socket.close(); }
+  browser?.kill();
+  backend?.kill();
+  await delay(600);
+  await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+}
