@@ -66,6 +66,73 @@ class ValidationTests(unittest.TestCase):
 
 
 class MonitorTests(unittest.TestCase):
+    def test_settings_defaults_validation_and_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = server.Monitor(directory, interval=60)
+            self.assertEqual(monitor.get_settings(), {'refresh_interval': 5, 'monitor_interval': 60})
+            for key, minimum in (('refresh_interval', 1), ('monitor_interval', 5)):
+                for value in (True, False, None, '10', 10.5, minimum - 1, 3601):
+                    with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                        monitor.update_settings({key: value})
+            for bad in ([], None, {'unknown': 1}):
+                with self.assertRaises(ValueError):
+                    monitor.update_settings(bad)
+            self.assertFalse(monitor.settings_path.exists())
+            for settings in ({'refresh_interval': 1, 'monitor_interval': 5},
+                             {'refresh_interval': 3600, 'monitor_interval': 3600}):
+                self.assertEqual(monitor.update_settings(settings), settings)
+                self.assertEqual(monitor.state()['interval'], settings['monitor_interval'])
+                self.assertEqual(monitor.state()['settings'], settings)
+                self.assertTrue(monitor.wake.is_set())
+                monitor.wake.clear()
+            monitor.update_settings({'refresh_interval': 3})
+            self.assertFalse(monitor.wake.is_set(), 'screen sync must not schedule measurement')
+            restarted = server.Monitor(directory, interval=30)
+            self.assertEqual(restarted.interval, 3600, 'saved value takes precedence over startup default')
+            self.assertEqual(restarted.get_settings()['refresh_interval'], 3)
+            public = restarted.get_settings()
+            public['refresh_interval'] = 99
+            self.assertEqual(restarted.get_settings()['refresh_interval'], 3)
+            monitor.settings_path.write_text('{broken', encoding='utf-8')
+            with self.assertRaises(ValueError):
+                server.Monitor(directory)
+
+    def test_settings_atomic_failure_does_not_change_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = server.Monitor(directory)
+            replace = os.replace
+            def checked_replace(source, destination):
+                if os.name == 'posix':
+                    self.assertEqual(Path(source).stat().st_mode & 0o777, 0o600)
+                replace(source, destination)
+            with patch('server.os.replace', side_effect=checked_replace):
+                monitor.update_settings({'refresh_interval': 2})
+            before = monitor.settings_path.read_bytes()
+            with patch('server.os.replace', side_effect=OSError('disk error')):
+                with self.assertRaises(OSError):
+                    monitor.update_settings({'monitor_interval': 10})
+            self.assertEqual(monitor.settings_path.read_bytes(), before)
+            self.assertEqual(monitor.interval, 30)
+            self.assertEqual(monitor.get_settings(), {'refresh_interval': 2, 'monitor_interval': 30})
+            self.assertFalse(monitor.wake.is_set())
+            self.assertEqual(list(Path(directory).glob('*.tmp')), [])
+
+    def test_settings_wake_interrupts_old_monitor_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = server.Monitor(directory)
+            waits = []
+            def wait(seconds):
+                waits.append(seconds)
+                if len(waits) == 1:
+                    monitor.update_settings({'monitor_interval': 5})
+                    self.assertTrue(monitor.wake.is_set())
+                else:
+                    monitor.stop.set()
+            with patch.object(monitor, 'cycle') as cycle, patch.object(monitor.wake, 'wait', side_effect=wait):
+                monitor.loop()
+            self.assertEqual(waits, [30, 5])
+            self.assertEqual(cycle.call_count, 2)
+
     def test_persistence_public_state_and_duplicate(self):
         with tempfile.TemporaryDirectory() as directory:
             monitor = server.Monitor(directory)
@@ -245,6 +312,22 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.request('PUT', '/api/hosts/' + host['id'], {'ip': '127.0.0.1', 'name': 'test'})[0], 200)
         self.assertEqual(self.request('DELETE', '/api/hosts/' + host['id'])[0], 200)
         self.assertEqual(self.request('GET', '/api/state')[1]['hosts'], [])
+
+    def test_settings_api_persistence_validation_and_origin(self):
+        self.assertEqual(self.request('GET', '/api/settings'),
+                         (200, {'refresh_interval': 5, 'monitor_interval': 30}))
+        settings = {'refresh_interval': 2, 'monitor_interval': 10}
+        self.assertEqual(self.request('PUT', '/api/settings', settings), (200, settings))
+        self.assertEqual(self.request('GET', '/api/state')[1]['settings'], settings)
+        self.assertEqual(server.Monitor(self.directory.name).get_settings(), settings)
+        for bad in ({'refresh_interval': True}, {'monitor_interval': 4}, {'unknown': 5}, []):
+            self.assertEqual(self.request('PUT', '/api/settings', bad)[0], 400)
+        self.assertEqual(self.request('PUT', '/api/settings', {'monitor_interval': 20},
+                                     {'Origin': 'http://evil.example'})[0], 403)
+        self.assertEqual(self.request('GET', '/api/settings', headers={'Host': 'evil.example'})[0], 403)
+        with patch('server.os.replace', side_effect=OSError('disk error')):
+            self.assertEqual(self.request('PUT', '/api/settings', {'monitor_interval': 20})[0], 500)
+        self.assertEqual(self.request('GET', '/api/settings')[1], settings)
 
     def test_notification_api_secrets_persistence_and_origin_protection(self):
         settings = {'username': 'sample@gmail.com', 'sender': 'sample@gmail.com',

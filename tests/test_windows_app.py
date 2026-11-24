@@ -71,6 +71,11 @@ class DesktopTests(unittest.TestCase):
             with urllib.request.urlopen(request) as response:
                 self.assertEqual(response.status, 201)
             saved = (self.directory / 'data' / 'hosts.json').read_bytes()
+            settings = {'refresh_interval': 2, 'monitor_interval': 60}
+            request = urllib.request.Request(url + '/api/settings', data=json.dumps(settings).encode(),
+                                             headers={'Content-Type': 'application/json'}, method='PUT')
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(json.load(response), settings)
             controller.start()
             self.assertEqual(controller.process.pid, first_pid)
             controller.stop()
@@ -79,6 +84,8 @@ class DesktopTests(unittest.TestCase):
             with urllib.request.urlopen(url + '/api/state') as response:
                 self.assertEqual(len(json.load(response)['hosts']), 1)
             self.assertEqual((self.directory / 'data' / 'hosts.json').read_bytes(), saved)
+            with urllib.request.urlopen(url + '/api/settings') as response:
+                self.assertEqual(json.load(response), settings)
         finally:
             controller.stop()
         self.assertTrue((self.directory / 'logs' / 'application.log').exists())

@@ -27,6 +27,7 @@ def exercise(executable, directory):
             with urllib.request.urlopen(url + '/', timeout=5) as response:
                 html = response.read().decode()
                 assert 'notification-dialog' in html
+                assert 'settings-dialog' in html
                 assert f'/__desktop__/{controller.session}/static/app.js' in html
             with urllib.request.urlopen(url + '/static/app.js', timeout=5) as response:
                 assert controller.session.encode() in response.read()
@@ -38,11 +39,18 @@ def exercise(executable, directory):
             with urllib.request.urlopen(request, timeout=5) as response:
                 assert response.status == 201
             saved = (directory / 'data' / 'hosts.json').read_bytes()
+            settings = {'refresh_interval': 2, 'monitor_interval': 60}
+            request = urllib.request.Request(url + '/api/settings', data=json.dumps(settings).encode(),
+                                             headers={'Content-Type': 'application/json'}, method='PUT')
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert json.load(response) == settings
             controller.stop()
             controller.start()
             with urllib.request.urlopen(url + '/api/state', timeout=5) as response:
                 assert len(json.load(response)['hosts']) == 1
             assert (directory / 'data' / 'hosts.json').read_bytes() == saved
+            with urllib.request.urlopen(url + '/api/settings', timeout=5) as response:
+                assert json.load(response) == settings
         finally:
             controller.stop()
     assert (directory / 'logs' / 'application.log').exists()

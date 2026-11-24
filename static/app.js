@@ -9,7 +9,8 @@
     detailSignature: null, extraChecks: [], formPending: false, scanBusy: false, scanStarting: false,
     adding: false, scan: { running: false, progress: 0, total: 0, results: [] },
     selected: new Set(), scanSignature: null, scanTimer: null, addFailures: '',
-    notificationBusy: false, notificationLoaded: false, notificationTimer: null
+    notificationBusy: false, notificationLoaded: false, notificationTimer: null,
+    refreshInterval: 5, stateTimer: null, settingsBusy: false, settingsLoaded: false
   };
 
   // All API data enters the DOM as text or DOM properties, never HTML.
@@ -275,6 +276,20 @@
     restoreFocus($('host-board'), key);
   }
 
+  function applySettings(settings) {
+    const seconds = settings?.refresh_interval;
+    if (Number.isInteger(seconds) && seconds >= 1 && seconds <= 3600 &&
+        (model.refreshInterval !== seconds || model.stateTimer === null)) {
+      model.refreshInterval = seconds;
+      clearInterval(model.stateTimer);
+      model.stateTimer = setInterval(() => void loadState(), seconds * 1000);
+    }
+    $('refresh-interval-label').textContent = `每 ${model.refreshInterval} 秒同步畫面`;
+    if (Number.isInteger(settings?.monitor_interval)) {
+      $('interval-label').textContent = `每 ${settings.monitor_interval} 秒監測`;
+    }
+  }
+
   async function loadState() {
     if (model.stateBusy) { model.stateAgain = true; return; }
     model.stateBusy = true;
@@ -289,12 +304,13 @@
       $('connection-text').textContent = '服務連線正常';
       $('last-sync').textContent = `同步於 ${new Date().toLocaleTimeString('zh-TW', { hour12: false })}`;
       $('interval-label').textContent = numeric(data.interval) ? `每 ${data.interval} 秒監測` : '監測週期由伺服器管理';
+      applySettings(data.settings);
       renderHosts();
       renderDetail();
       renderScan();
     } catch (error) {
       model.stateError = true;
-      showError('state-error', `${error.message}。每 5 秒自動重試；目前資料可能不是最新狀態。`);
+      showError('state-error', `${error.message}。每 ${model.refreshInterval} 秒自動重試；目前資料可能不是最新狀態。`);
       $('connection').firstElementChild.className = 'status-dot down';
       $('connection-text').textContent = '服務連線中斷';
       if (!model.loaded) {
@@ -822,6 +838,45 @@
     } catch (error) { showError('notification-error', error.message); }
     finally { mailBusy(false); }
   }
+  function settingsBusy(busy) {
+    model.settingsBusy = busy;
+    $('settings-fields').disabled = busy || !model.settingsLoaded;
+    $('save-settings').disabled = busy || !model.settingsLoaded;
+  }
+  $('open-settings').addEventListener('click', async () => {
+    if (model.settingsBusy) return;
+    model.settingsLoaded = false;
+    settingsBusy(true);
+    $('settings-form').reset();
+    showError('settings-error', '');
+    $('settings-dialog').showModal();
+    try {
+      const data = await api('/api/settings');
+      $('refresh-interval').value = data.refresh_interval;
+      $('monitor-interval').value = data.monitor_interval;
+      applySettings(data);
+      model.settingsLoaded = true;
+    } catch (error) { showError('settings-error', error.message); }
+    finally { settingsBusy(false); }
+  });
+  $('settings-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (model.settingsBusy || !model.settingsLoaded) return;
+    settingsBusy(true);
+    showError('settings-error', '');
+    try {
+      const saved = await api('/api/settings', 'PUT', {
+        refresh_interval: Number($('refresh-interval').value),
+        monitor_interval: Number($('monitor-interval').value)
+      });
+      applySettings(saved);
+      $('settings-dialog').close();
+      toast('更新頻率設定已儲存');
+      void loadState();
+    } catch (error) { showError('settings-error', error.message); }
+    finally { settingsBusy(false); }
+  });
+  $('settings-dialog').addEventListener('cancel', (event) => { if (model.settingsBusy) event.preventDefault(); });
   $('nav-notifications').addEventListener('click', openNotifications);
   $('notification-form').addEventListener('submit', saveNotifications);
   $('gmail-preset').addEventListener('click', () => {
@@ -846,6 +901,7 @@
   document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => {
     if (button.dataset.close === 'host-dialog' && model.formPending) return;
     if (button.dataset.close === 'notification-dialog' && model.notificationBusy) return;
+    if (button.dataset.close === 'settings-dialog' && model.settingsBusy) return;
     $(button.dataset.close).close();
   }));
   $('host-dialog').addEventListener('cancel', (event) => { if (model.formPending) event.preventDefault(); });
@@ -931,5 +987,5 @@
   renderScan();
   void loadState();
   void pollScan();
-  setInterval(() => void loadState(), 5000);
+  applySettings({ refresh_interval: model.refreshInterval });
 })();

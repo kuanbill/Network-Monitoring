@@ -16,7 +16,17 @@ python server.py
 python server.py --port 8088 --interval 30 --data-dir ./data
 ```
 
-`--interval` 為每輪檢查完成後的等待秒數，允許 5–3600 秒；主機多或逾時時，實際更新間隔會更長。
+`--interval` 為尚未儲存設定時的背景監測預設等待秒數，允許 5–3600 秒；已有 `settings.json` 時，以已儲存值優先。
+
+### 調整更新頻率
+
+在主機面板下方按「更新頻率設定」：
+
+- **畫面同步間隔**：1–3600 秒，預設 5 秒；只同步管理端資料，不會重新量測主機。
+- **背景監測間隔**：5–3600 秒，預設 30 秒；每輪量測完成後等待此秒數，主機多或逾時時，實際量測間隔更長。
+- 儲存後目前畫面立即套用；背景監測間隔有變更時會安排新一輪檢查。其他已開啟的畫面在下次同步時套用。
+- 設定保存在資料目錄的 `settings.json`，重新啟動仍保留。Windows 版為 `%LOCALAPPDATA%\NetwordMonitor\data\settings.json`；Docker／原生版預設為專案 `data/settings.json`。`GET /api/settings`、`PUT /api/settings` 使用 `refresh_interval`、`monitor_interval` 整數秒數。
+- 更短的間隔會增加網路／主機負載，也會影響以連續輪次確認的異常通知時間；不會改變 Agent 本身的指標收集頻率。
 
 ## Windows 安裝版（獨立視窗＋系統匣）
 
@@ -38,7 +48,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 
 1. 備份專案 `data`，在 `E:\netword-monitor` 執行 `docker compose down`，保留原始設定。
 2. 安裝並啟動 Windows 版一次，從系統匣選「離開」，確認背景管理端已停止。
-3. 將原 `data/hosts.json` 與 `data/notifications.json`（若有）複製到 `%LOCALAPPDATA%\NetwordMonitor\data`。檔案含明文 Token／SMTP 密碼，請勿以郵件或 Git 傳送。
+3. 將原 `data/hosts.json`、`data/notifications.json` 與 `data/settings.json`（後兩者若有）複製到 `%LOCALAPPDATA%\NetwordMonitor\data`。檔案含明文 Token／SMTP 密碼，請勿以郵件或 Git 傳送。
 4. 重新開啟 Windows 版，驗證主機、Agent 與通知。不要讓兩個管理端同時使用同一份設定。
 
 升級前先從系統匣離開；重新安裝即可更新程式。要回復 Docker，先離開 Windows 版，再於專案目錄執行 `docker compose up -d`；兩邊設定各自獨立，若有修改，須在都停止時自行同步。
@@ -115,7 +125,7 @@ TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正�
 
 ### 通知規則與限制
 
-- 預設連續 **2 輪** `degraded`／`down` 才通知；連續 **2 輪** `up` 確認恢復，可選擇寄恢復信。次數可設為 1–10，依完成的主機量測計算，不是前端 5 秒輪詢。
+- 預設連續 **2 輪** `degraded`／`down` 才通知；連續 **2 輪** `up` 確認恢復，可選擇寄恢復信。次數可設為 1–10，依完成的主機量測計算，不是畫面同步次數。
 - 同一異常事件只通知一次，`degraded` 與 `down` 互換不重複通知；確認恢復後再次異常才建立新事件。郵件以繁體中文列出主機名稱、IP、檢查時間（管理端時區）、失敗項目、可能原因與建議處理方式，包含 TCP 連接埠、HTTP 狀態、Agent 與指定系統服務狀態。無法確認根本原因時會明確說明，不將連線失敗視為已確認關機；不包含 Agent Token、原始錯誤或 HTTP URL 私密查詢參數。
 - 郵件使用獨立背景工作及有上限的佇列，不會阻塞主機監測。每封異常／恢復通知最多嘗試 3 次，相隔至少 60 秒；測試信僅嘗試一次。使用 FIFO 保持事件順序，因此 SMTP 故障重試會延後後續郵件。
 - 單次寄送期限 20 秒，socket 閒置逾時 5 秒。若 DNS／底層呼叫未能及時退出，顯示結果未確定，等待原工作結束而不持續新增執行緒。

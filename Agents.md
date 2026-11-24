@@ -31,6 +31,7 @@
 - `static/app.js`：API 輪詢、畫面狀態、戰情卡片與表單操作，無前端框架或打包流程。
 - `static/style.css`：深色響應式介面、桌面四台戰情總覽與全螢幕樣式。
 - `Dockerfile`、`compose.yaml`、`.dockerignore`：管理端映像與本機部署設定。
+- `data/settings.json`：共用畫面同步與背景監測間隔，原子保存，重啟保留；Windows 版使用其獨立資料目錄，不隨安裝包提供。
 - `data/hosts.json`：主機設定與 Agent Token；屬機密資料，不可提交版本控制或打包進映像。
 - `data/notifications.json`：通知設定與明文 SMTP 密碼，同屬機密資料；密碼只供寫入，省略保留、空字串清除，API 僅回傳 `password_set`。
 - `tests/test_server.py`：管理端驗證、狀態判定、HTTP 安全、保存與逾時測試。
@@ -80,7 +81,8 @@ docker compose down
 
 主要 API：
 
-- `GET /api/state`：全部主機、最新檢查、Agent 指標、近期歷史與監測間隔。
+- `GET /api/state`：全部主機、最新檢查、Agent 指標、近期歷史、相容欄位 `interval` 與 `settings` 更新頻率設定。
+- `GET /api/settings`、`PUT /api/settings`：共用更新頻率；`refresh_interval` 為 1–3600 整數秒、`monitor_interval` 為 5–3600 整數秒，拒絕布林、字串及未知欄位。省略欄位保留現值，保存失敗不得修改記憶體。
 - `POST /api/hosts`、`PUT /api/hosts/{id}`、`DELETE /api/hosts/{id}`：主機設定維護。
 - `POST /api/refresh`：安排背景立即檢查，不保證回應當下已完成量測。
 - `POST /api/scan`：提交 `{range, ports}` 探索工作。
@@ -97,7 +99,7 @@ docker compose down
 - `down`：沒有取得可達證據，不等同證明主機關機。
 - 無歷史或尚未檢查時，前端顯示待檢查，不可視為正常。
 
-監測預設每輪完成後等待 30 秒；前端每 5 秒同步 API，兩者不是相同量測頻率。每台保留最近 120 筆狀態在記憶體，重啟後重新累積。主機設定以原子替換保存，保存失敗須回復記憶體，避免畫面與檔案不一致。
+監測預設每輪完成後等待 30 秒；前端預設每 5 秒同步 API，兩者不是相同量測頻率。面板下方「更新頻率設定」可分別調整並保存至 `settings.json`；已保存監測值優先於 CLI `--interval` 的啟動預設值。監測間隔改變會喚醒等待並安排新一輪檢查，畫面同步變更不觸發量測；其他畫面在下次同步時套用。不變更 Agent 自身的 5 秒收集頻率。每台保留最近 120 筆狀態在記憶體，重啟後重新累積。主機設定以原子替換保存，保存失敗須回復記憶體，避免畫面與檔案不一致。
 
 探索只接受指定私有 IPv4 與本機回環範圍，單次最多 1024 位址；空連接埠清單表示只使用 Ping。Docker 內的 `127.0.0.1` 指容器自己，監控 Windows 管理主機應使用 `192.168.6.6`。
 
@@ -182,6 +184,13 @@ Agent 程式修改不會自動更新遠端主機；需另行複製程式、更�
 - 去重與待寄佇列僅在記憶體，重啟或變更通知設定後重新累積；刪除／變更主機連線設定取消該主機舊事件。停用無法撤回已進入 SMTP 的郵件。勿在日誌／錯誤回應輸出 SMTP 原始例外，可能含密碼或郵件內容。
 - 目前沒有長期歷史資料庫、內建管理介面 TLS 或集中自動更新功能。
 
+## 更新頻率功能開發紀錄（2026-11-24）
+
+- `server.py`：由 `Monitor` 載入／管理設定，沿用既有 Host／Origin 防護提供設定 API；以唯一暫存檔、fsync、原子替換保存，成功後才更新記憶體。既有設定檔格式錯誤時明確中止啟動，不靜默覆寫。
+- `static/index.html`、`static/app.js`：新增設定對話框與獨立的畫面／監測間隔，替換固定輪詢計時器，保留請求不重疊機制；頁尾、連線失敗重試文字隨設定變更。Windows 工作階段 API 路徑隔離保持不變。
+- `tests/test_server.py`、`tests/browser_smoke.mjs`：涵蓋預設值、上下界／型別、部分更新、保存失敗、喚醒監測、HTTP 防護、重載及動態計時器。`tests/test_windows_app.py`、`tests/windows_package_smoke.py` 驗證獨立桌面後端重啟後保留設定。
+- 使用及搬移步驟見 `README.md`。安裝包與 Docker 映像已重建；僅提交原始碼、測試及文件，不提交 `data`、Token、SMTP 密碼、日誌或 `dist` 產物。未變更正式設定、未自動安裝升級，亦未啟動已停止的 Docker 服務。
+
 ## 8. 測試與驗收
 
 ```powershell
@@ -194,6 +203,8 @@ docker compose config --quiet
 開發環境尚無 psutil 時，先安裝 `requirements-agent.txt`，才能執行完整真實 Agent 整合測試。瀏覽器測試可用 `CHROME_PATH` 指定執行檔，`PYTHON` 指定 Python；使用臨時資料目錄，不可把測試指向正式設定。
 
 目前已驗證：
+
+- 更新頻率功能新增後：89 項 Python 測試通過（開發 venv 略過 3 項 Windows 相依測試），獨立建置環境 12 項 Windows 測試通過；瀏覽器驗證間隔保存／重開／重載、1 秒輪詢替換計時器、跨畫面同步及手機設定框。新版安裝包已重新建置，frozen 後端重啟保留頻率、原生 WebView2／系統匣測試通過。Docker 僅重建映像：當時 Compose 服務未運行，未啟動以免與 Windows 版爭用 8080；未替使用者安裝升級。
 
 - 2026-11-24 WebView2 改版：12 項隔離桌面測試及真實 WebView2 載入／隱藏／重開／離開測試通過；frozen 後端與保存測試通過。現有桌面安裝已存在，本輪未覆寫其登錄或執行安裝／解除安裝測試，未切換正式 Docker。完整開發環境 85 項測試完成（缺少桌面套件略過 3 項）。
 - Windows 本機 80 項 Python 測試完成（含真實 Agent 整合測試及通知測試，原開發 venv 缺 pystray 時略過 1 項選單測試）。獨立 Windows 建置環境另驗證全部 7 項桌面測試通過。

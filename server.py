@@ -227,13 +227,29 @@ def inspect_host(host):
     return {'timestamp': time.time(), 'status': status, 'latency_ms': latency, 'reachable': alive, 'checks': results, 'agent': agent}
 
 
+def validate_settings(data, previous=None):
+    if not isinstance(data, dict) or set(data) - {'refresh_interval', 'monitor_interval'}:
+        raise ValueError('更新頻率設定格式不正確')
+    result = dict(previous or {'refresh_interval': 5, 'monitor_interval': 30})
+    result.update(data)
+    for key, minimum in (('refresh_interval', 1), ('monitor_interval', 5)):
+        value = result[key]
+        if type(value) is not int or not minimum <= value <= 3600:
+            label = '畫面同步' if key == 'refresh_interval' else '背景監測'
+            raise ValueError(f'{label}秒數須為 {minimum}–3600 的整數')
+    return result
+
+
 class Monitor:
     def __init__(self, data_dir, interval=30):
         self.path = Path(data_dir) / 'hosts.json'
+        self.settings_path = Path(data_dir) / 'settings.json'
+        defaults = validate_settings({'monitor_interval': interval})
+        self.settings = validate_settings(json.loads(self.settings_path.read_text(encoding='utf-8')), defaults) if self.settings_path.exists() else defaults
         self.notifications = NotificationManager(data_dir)
         self.lock = threading.RLock()
         self.cycle_lock = threading.Lock()
-        self.interval = interval
+        self.interval = self.settings['monitor_interval']
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.hosts = []
@@ -256,6 +272,31 @@ class Monitor:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def get_settings(self):
+        with self.lock:
+            return dict(self.settings)
+
+    def update_settings(self, data):
+        with self.lock:
+            settings = validate_settings(data, self.settings)
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, name = tempfile.mkstemp(prefix='settings-', suffix='.tmp', dir=self.settings_path.parent)
+            temporary = Path(name)
+            try:
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                    json.dump(settings, stream, ensure_ascii=False, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.settings_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            changed = self.interval != settings['monitor_interval']
+            self.settings = settings
+            self.interval = settings['monitor_interval']
+            if changed:
+                self.wake.set()
+            return dict(settings)
+
     def state(self):
         with self.lock:
             hosts = []
@@ -264,7 +305,7 @@ class Monitor:
                 public['agent_token_set'] = bool(host['agent_token'])
                 public.update(self.states.get(host['id'], {'last': None, 'history': []}))
                 hosts.append(public)
-            return copy.deepcopy({'hosts': hosts, 'interval': self.interval})
+            return copy.deepcopy({'hosts': hosts, 'interval': self.interval, 'settings': self.settings})
 
     def change(self, data, identity=None, delete=False):
         with self.lock:
@@ -426,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == '/api/state':
             return self.send_json(200, self.server.monitor.state())
+        if path == '/api/settings':
+            return self.send_json(200, self.server.monitor.get_settings())
         if path == '/api/notifications':
             return self.send_json(200, self.server.monitor.notifications.public())
         if path == '/api/scan':
@@ -462,6 +505,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('請求須為 JSON 物件')
             path = urlsplit(self.path).path
             monitor = self.server.monitor
+            if path == '/api/settings' and self.command == 'PUT':
+                return self.send_json(200, monitor.update_settings(data))
             if path == '/api/notifications' and self.command == 'PUT':
                 return self.send_json(200, monitor.notifications.update(data))
             if path == '/api/notifications/test' and self.command == 'POST':

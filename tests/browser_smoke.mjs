@@ -113,8 +113,30 @@ try {
   await until(async () => !(await (await fetch(base + '/api/notifications')).json()).password_set, 'email secret explicitly cleared');
   await until(() => evaluate(`!document.querySelector('#save-notification').disabled`), 'email clear completed');
   await evaluate(`document.querySelector('#notification-dialog').close()`);
+  // Frequency settings persist in this isolated server and reschedule the active page timer.
+  await evaluate(`document.querySelector('#open-settings').click()`);
+  await until(() => evaluate(`!document.querySelector('#save-settings').disabled`), 'frequency settings loaded');
+  assert.equal(await evaluate(`document.querySelector('#refresh-interval').value`), '5');
+  assert.equal(await evaluate(`document.querySelector('#settings-dialog').scrollWidth<=document.querySelector('#settings-dialog').clientWidth`), true, 'frequency dialog fits mobile');
+  await evaluate(`document.querySelector('#monitor-interval').value='4'`);
+  assert.equal(await evaluate(`document.querySelector('#settings-form').checkValidity()`), false, 'invalid monitor interval rejected');
+  await evaluate(`document.querySelector('#refresh-interval').value='1'; document.querySelector('#monitor-interval').value='60'; document.querySelector('#settings-form').requestSubmit()`);
+  await until(() => evaluate(`!document.querySelector('#settings-dialog').open && document.querySelector('#refresh-interval-label').textContent.includes('1 秒') && document.querySelector('#interval-label').textContent.includes('60 秒')`), 'frequency saved and displayed');
+  assert.deepEqual(await (await fetch(base + '/api/settings')).json(), {refresh_interval:1, monitor_interval:60});
+  await evaluate(`window.__frequencyFetch=window.fetch; window.__statePolls=0; window.fetch=(path,options)=>{if(String(path)==='/api/state')window.__statePolls++; return window.__frequencyFetch(path,options)}`);
+  await delay(2700);
+  assert.ok(await evaluate(`window.__statePolls>=2 && window.__statePolls<=3`), 'new 1-second timer replaces old timer without duplication');
+  await evaluate(`window.fetch=window.__frequencyFetch; document.querySelector('#open-settings').click()`);
+  await until(() => evaluate(`!document.querySelector('#save-settings').disabled`), 'frequency reopened');
+  assert.equal(await evaluate(`document.querySelector('#monitor-interval').value`), '60');
+  await evaluate(`document.querySelector('#settings-dialog').close()`);
+  await command('Page.reload');
+  await until(() => evaluate(`document.querySelector('#refresh-interval-label').textContent.includes('1 秒') && document.querySelector('#interval-label').textContent.includes('60 秒')`), 'saved frequency loaded after page reload');
+  // A second client changes the shared setting; this page picks it up via /api/state.
+  await fetch(base + '/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({monitor_interval:30})});
+  await until(() => evaluate(`document.querySelector('#interval-label').textContent.includes('30 秒')`), 'shared frequency change synchronized');
   // Keep fixture data inside this page; never modify deployed hosts or saved tokens.
-  const fixture = {interval:30, hosts:Array.from({length:4}, (_, index) => ({
+  const fixture = {interval:30, settings:{refresh_interval:1,monitor_interval:30}, hosts:Array.from({length:4}, (_, index) => ({
     id:`fixture-${index}`, name:`Fixture ${index}`, ip:`192.168.8.${index+1}`, agent_enabled:index!==3, history:[],
     last:{timestamp:Date.now()/1000, status:index===2?'degraded':'up', latency_ms:1.5,
       checks:[{type:'tcp',label:'TCP 22',ok:true}],
@@ -153,7 +175,7 @@ try {
   await until(() => evaluate(`!document.querySelector('#state-error').hidden`),'connection failure warning');
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('#state-error')).display!=='none'`),true,'stale-data warning remains visible in wall mode');
   assert.deepEqual(errors, []);
-  console.log('PASS: host/scan workflows, Gmail settings/secret preservation/clearing/test queue, metrics board, safe rendering, missing agent, service failure, filters, details, list toggle, mobile and four-host desktop wall');
+  console.log('PASS: persisted adjustable frequency/timer/mobile, host/scan workflows, Gmail settings/secret preservation/clearing/test queue, metrics board, safe rendering, missing agent, service failure, filters, details, list toggle, mobile and four-host desktop wall');
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {
     try { console.error('Browser diagnostic:', await evaluate(`JSON.stringify({hostError:document.querySelector('#host-form-error').textContent,scanError:document.querySelector('#scan-error').textContent,scanStatus:document.querySelector('#scan-status').textContent,scanRange:document.querySelector('#scan-range').value,scanPorts:document.querySelector('#scan-ports').value})`)); } catch {}
