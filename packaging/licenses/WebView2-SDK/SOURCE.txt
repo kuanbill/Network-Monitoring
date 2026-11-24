@@ -1,0 +1,5 @@
+Microsoft.Web.WebView2 SDK 1.0.3856.49 redistribution notices.
+Matches Microsoft.Web.WebView2.Core.dll bundled by pywebview 6.2.1.
+LICENSE.txt and NOTICE.txt copied without modification from:
+https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3856.49/microsoft.web.webview2.1.0.3856.49.nupkg
+These notices cover the SDK DLLs, not the separately installed Evergreen Runtime.

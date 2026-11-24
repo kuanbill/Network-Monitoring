@@ -1,0 +1,235 @@
+"""Desktop tests always use temporary settings and an isolated loopback port."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+import urllib.request
+
+import windows_app as app
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Windows desktop only')
+class DesktopTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temp.name)
+        (self.directory / 'data').mkdir()
+        (self.directory / 'logs').mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def free_port(self):
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            return sock.getsockname()[1]
+
+    def test_data_path_is_not_source_or_install_directory(self):
+        with patch.dict(os.environ, {'LOCALAPPDATA': self.temp.name}):
+            self.assertEqual(app.app_directory(), self.directory / 'NetwordMonitor')
+
+    def test_single_instance_lock_is_released(self):
+        first = app.InstanceLock(self.directory)
+        try:
+            with self.assertRaises(RuntimeError):
+                app.InstanceLock(self.directory)
+        finally:
+            first.close()
+        second = app.InstanceLock(self.directory)
+        second.close()
+
+    def test_named_events_are_shared_and_reset_for_each_start(self):
+        event = app.NamedEvent()
+        other = app.NamedEvent(event.name)
+        try:
+            self.assertFalse(event.wait(0))
+            other.set()
+            self.assertTrue(event.wait(100))
+        finally:
+            other.close()
+            event.close()
+
+    def test_backend_start_stop_restart_and_configuration_persistence(self):
+        controller = app.BackendController(self.directory, self.free_port())
+        url = controller.url
+        try:
+            controller.start()
+            first_pid = controller.process.pid
+            with urllib.request.urlopen(url + '/') as response:
+                self.assertIn('notification-dialog', response.read().decode())
+            payload = json.dumps({'name': 'Desktop test', 'ip': '127.0.0.1', 'checks': []}).encode()
+            request = urllib.request.Request(url + '/api/hosts', data=payload,
+                                             headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 201)
+            saved = (self.directory / 'data' / 'hosts.json').read_bytes()
+            controller.start()
+            self.assertEqual(controller.process.pid, first_pid)
+            controller.stop()
+            self.assertFalse(controller.running())
+            controller.start()
+            with urllib.request.urlopen(url + '/api/state') as response:
+                self.assertEqual(len(json.load(response)['hosts']), 1)
+            self.assertEqual((self.directory / 'data' / 'hosts.json').read_bytes(), saved)
+        finally:
+            controller.stop()
+        self.assertTrue((self.directory / 'logs' / 'application.log').exists())
+
+    def test_occupied_port_never_opens_other_application(self):
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            controller = app.BackendController(self.directory, occupied.getsockname()[1])
+            with self.assertRaises(RuntimeError):
+                controller.start()
+            self.assertFalse(controller.running())
+            controller.stop()
+        self.assertFalse((self.directory / 'data' / 'hosts.json').exists())
+
+    @unittest.skipUnless(importlib.util.find_spec('webview'), 'Install requirements-windows.txt for desktop test')
+    def test_desktop_close_hides_and_tray_reopens_then_quits(self):
+        import pystray
+        import webview
+        controller = Mock()
+        controller.running.return_value = True
+        controller.url = app.URL + '/__desktop__/test'
+        window = Mock()
+        closing = []
+        class ClosingEvent:
+            def __iadd__(self, callback):
+                closing.append(callback)
+                return self
+        window.events.closing = ClosingEvent()
+        icons = []
+        def tray_loop(icon):
+            icons.append(icon)
+        def ui_loop(**kwargs):
+            self.assertEqual(kwargs, dict(gui='edgechromium', debug=False, private_mode=True))
+            self.assertFalse(closing[0]())
+            window.hide.assert_called_once()
+            items = list(icons[0].menu)
+            self.assertIn('啟動監控', [item.text for item in items])
+            self.assertIn('停止監控', [item.text for item in items])
+            items[0](icons[0])
+            window.show.assert_called_once()
+            window.restore.assert_called_once()
+            items[-1](icons[0])
+            window.destroy.assert_called_once()
+            self.assertIsNone(closing[0]())
+        with patch.object(app, 'BackendController', return_value=controller), \
+                patch.object(app, 'require_webview2'), \
+                patch.object(pystray.Icon, 'run_detached', tray_loop), \
+                patch.object(pystray.Icon, 'stop'), \
+                patch.object(webview, 'create_window', return_value=window) as create, \
+                patch.object(webview, 'start', side_effect=ui_loop), \
+                patch('webbrowser.open') as browser:
+            app.run_tray(self.directory)
+            controller.start.assert_called_once()
+            controller.stop.assert_called_once()
+            self.assertEqual(create.call_args.args, (app.APP_NAME, controller.url + '/'))
+            browser.assert_not_called()
+
+    @unittest.skipUnless(importlib.util.find_spec('webview'), 'Install requirements-windows.txt for desktop test')
+    def test_failed_backend_never_creates_window(self):
+        import webview
+        controller = Mock()
+        controller.start.side_effect = RuntimeError('occupied')
+        controller.running.return_value = False
+        with patch.object(app, 'BackendController', return_value=controller), \
+                patch.object(app, 'message'), patch.object(app, 'require_webview2'), \
+                patch.object(webview, 'create_window') as create:
+            app.run_tray(self.directory)
+            create.assert_not_called()
+            controller.stop.assert_called_once()
+
+    @unittest.skipUnless(importlib.util.find_spec('webview'), 'Install requirements-windows.txt for desktop test')
+    def test_missing_runtime_stops_backend_and_explains(self):
+        import webview
+        controller = Mock()
+        controller.running.return_value = True
+        controller.url = app.URL + '/__desktop__/test'
+        with patch.object(app, 'BackendController', return_value=controller), \
+                patch.object(app, 'require_webview2'), \
+                patch('pystray.Icon.run_detached'), patch('pystray.Icon.stop'), \
+                patch.object(webview, 'create_window'), \
+                patch.object(webview, 'start', side_effect=RuntimeError('missing runtime')), \
+                patch.object(app, 'message') as message:
+            with self.assertRaises(RuntimeError):
+                app.run_tray(self.directory)
+            self.assertIn('WebView2 Runtime', message.call_args.args[0])
+            controller.stop.assert_called_once()
+
+    def test_desktop_session_paths_cannot_target_replacement_backend(self):
+        first = app.BackendController(self.directory, self.free_port())
+        second = app.BackendController(self.directory, first.port)
+        try:
+            first.start()
+            with urllib.request.urlopen(first.url + '/static/app.js') as response:
+                self.assertIn(first.session.encode(), response.read())
+            first.stop()
+            second.start()
+            for path in ('/', '/static/app.js', '/static/style.css'):
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(first.url + path)
+                self.assertEqual(raised.exception.code, 404)
+                raised.exception.close()
+            for method in ('GET', 'POST', 'PUT', 'DELETE'):
+                request = urllib.request.Request(first.url + '/api/hosts', method=method,
+                                                 data=None if method == 'GET' else b'{}',
+                                                 headers={'Content-Type': 'application/json'})
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request)
+                self.assertEqual(raised.exception.code, 404)
+                raised.exception.close()
+            self.assertFalse((self.directory / 'data' / 'hosts.json').exists())
+        finally:
+            first.stop()
+            second.stop()
+
+    def test_webview2_preflight_rejects_legacy_renderer(self):
+        gui = Mock()
+        gui.initialize.return_value.renderer = 'mshtml'
+        with patch.dict(sys.modules, {'webview.guilib': gui}):
+            with self.assertRaisesRegex(RuntimeError, 'WebView2 Runtime required'):
+                app.require_webview2()
+        gui.initialize.assert_called_once_with('edgechromium')
+
+    def test_windows_session_ending_sets_exit_and_unsubscribes(self):
+        handlers = []
+        class Event:
+            def __iadd__(self, handler):
+                handlers.append(handler)
+                return self
+            def __isub__(self, handler):
+                handlers.remove(handler)
+                return self
+        gui = Mock()
+        gui.initialize.return_value.renderer = 'edgechromium'
+        events = SimpleNamespace(SessionEnding=Event())
+        exiting = threading.Event()
+        with patch.dict(sys.modules, {'webview.guilib': gui,
+                                     'Microsoft.Win32': SimpleNamespace(SystemEvents=events)}):
+            unsubscribe = app.require_webview2(exiting.set)
+            self.assertFalse(exiting.is_set())
+            handlers[0](None, None)
+            self.assertTrue(exiting.is_set())
+            unsubscribe()
+            self.assertEqual(handlers, [])
+
+    def test_directory_acl_prepared_before_private_files(self):
+        target = self.directory / 'profile'
+        app.prepare_directory(target)
+        self.assertTrue((target / 'data').is_dir())
+        self.assertTrue((target / 'logs').is_dir())
+
+
+if __name__ == '__main__':
+    unittest.main()

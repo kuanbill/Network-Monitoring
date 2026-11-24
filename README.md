@@ -18,6 +18,47 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 
 `--interval` 為每輪檢查完成後的等待秒數，允許 5–3600 秒；主機多或逾時時，實際更新間隔會更長。
 
+## Windows 安裝版（獨立視窗＋系統匣）
+
+支援 Windows 10／11 x64，目標電腦不需 Python 或 Docker，但需 Microsoft Edge WebView2 Runtime（多數電腦已內建；缺少時請從 https://developer.microsoft.com/microsoft-edge/webview2/ 安裝 Evergreen Runtime）。不會自動下載或要求管理員權限，也不會改用舊版 IE 引擎。安裝檔為
+`dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
+
+- 安裝僅供目前使用者，不需管理員權限。安裝目錄為 `%LOCALAPPDATA%\Programs\NetwordMonitor`。
+- 啟動後自動開始監控並開啟獨立 WebView2 桌面視窗，不另開瀏覽器分頁。右下系統匣可開啟介面、啟動／停止監控、開啟資料／日誌資料夾及離開。圖示可能位於隱藏圖示區；按視窗 X 會隱藏至系統匣並繼續監控，從系統匣選「離開」才會結束程式。
+- 可於安裝時選擇「登入 Windows 後自動啟動」，預設不勾選。這不是 Windows 服務，登出後不持續執行。
+- 桌面視窗使用獨立隨機工作階段路徑，停止後不會將 API 操作送到後來啟動的 Docker／另一個桌面管理端；這不是登入認證。
+- 僅綁定 `127.0.0.1:8080`，保留原有 Host／Origin 防護。重複開啟會提示已有程式執行；8080 已被 Docker／其他程式占用時不會啟動管理端，也不會自動開啟另一個程式的頁面。
+- 設定在 `%LOCALAPPDATA%\NetwordMonitor\data`，日誌在同目錄下的 `logs`，限制目前使用者、SYSTEM、Administrators 存取。日誌最多約 4 MB。設定不放在安裝目錄，升級／解除安裝會保留資料。
+- 安裝包不含任何主機設定、Token、SMTP 密碼或備份，首次使用為空設定。各主機 Agent 仍需獨立部署，並確認管理電腦的實際來源 IP 在白名單內。
+- 停止／離開時先要求背景程序正常結束，最多等候 10 秒，仍未結束才終止該子程序；已提交 SMTP 的信無法撤回，記憶體歷史與佇列會清除。
+
+### 從現有 Docker 設定移轉（選用）
+
+**目前部署不會被安裝或建置自動停止，也不會自動搬移機密。** 確定要切換時：
+
+1. 備份專案 `data`，在 `E:\netword-monitor` 執行 `docker compose down`，保留原始設定。
+2. 安裝並啟動 Windows 版一次，從系統匣選「離開」，確認背景管理端已停止。
+3. 將原 `data/hosts.json` 與 `data/notifications.json`（若有）複製到 `%LOCALAPPDATA%\NetwordMonitor\data`。檔案含明文 Token／SMTP 密碼，請勿以郵件或 Git 傳送。
+4. 重新開啟 Windows 版，驗證主機、Agent 與通知。不要讓兩個管理端同時使用同一份設定。
+
+升級前先從系統匣離開；重新安裝即可更新程式。要回復 Docker，先離開 Windows 版，再於專案目錄執行 `docker compose up -d`；兩邊設定各自獨立，若有修改，須在都停止時自行同步。
+
+### 建置 Windows 安裝檔
+
+在 Windows x64 安裝 Python 3.10+ 與 Inno Setup 6，再於專案執行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Iscc "C:\Path\To\ISCC.exe"
+# 僅測試安裝包，使用臨時資料與隨機連接埠，不觸碰正式設定：
+python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe
+# 已有正式桌面安裝時不覆寫其登錄，改驗證可攜式後端：
+python tests/windows_package_smoke.py --exe dist/NetwordMonitor/NetwordMonitor.exe
+# 真實 WebView2／系統匣介面測試，同樣使用臨時資料與隨機連接埠：
+.venv-windows-build\Scripts\python.exe tests/windows_ui_smoke.py
+```
+
+腳本建立獨立 `.venv-windows-build`、安裝 `requirements-windows.txt`，透過 PyInstaller 產出整個 `dist/NetwordMonitor` 資料夾，再以 Inno Setup 建立安裝檔。不可只複製其中的 EXE；`_internal` 也是必要部分。相依套件授權在 `_internal/licenses`。已使用 Inno Setup 6.4.3 驗證；使用新版編譯器請先確認其商業使用授權條件。建置工具／輸出均忽略 Git，不應將本機 `.venv` 或設定加入打包白名單。
+
 ## Docker 部署（本機 Docker Desktop）
 
 在 `E:\netword-monitor` 執行，先停止原本佔用 8080 的 `python server.py`，避免兩個管理程序共用設定檔：

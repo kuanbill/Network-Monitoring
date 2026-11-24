@@ -3,3 +3,9 @@ __pycache__/
 .venv/
 data/
 .env
+.venv-windows-build/
+.build-tools/
+build/
+dist/
+packaging/licenses/*
+!packaging/licenses/WebView2-SDK/

@@ -24,6 +24,9 @@
 - `agent.py`：在被監控主機上執行，透過 psutil 提供 CPU、記憶體、磁碟、運行時間及指定系統服務狀態。
 - `notifications.py`：SMTP 設定驗證與安全原子保存、異常／恢復狀態機、單一背景寄信工作與有界佇列，僅 Python 標準函式庫。
 - `requirements-agent.txt`：Agent 相依套件，psutil 版本範圍 `>=6,<8`。
+- `windows_app.py`：Windows 每使用者 WebView2 獨立視窗與系統匣，透過事件控制獨立管理子程序，固定回環 8080，不與 Docker 共用設定。Windows 使用 `SO_EXCLUSIVEADDRUSE` 避免重複綁定。視窗 X 隱藏至系統匣，離開才停止；需 WebView2 Runtime，明確拒絕 MSHTML 回退。桌面 API 使用每個控制器獨立隨機路徑，避免停止後舊頁面誤操作後來接手 8080 的 Docker；不是登入認證。
+- `packaging/`、`requirements-windows.txt`：PyInstaller／Inno Setup 安裝包、圖示、繁中訊息與授權收集腳本。輸出 `dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe`，不含正式機密；建置工具與輸出忽略 Git。
+- Windows 設定位於 `%LOCALAPPDATA%\NetwordMonitor\data`，日誌位於 `logs`；安裝目錄為 `%LOCALAPPDATA%\Programs\NetwordMonitor`，解除安裝保留設定。尚未切換正式 Docker 或自動搬移設定；切換須先停止一方並遵循 README。
 - `static/index.html`：單頁介面與設定、探索、詳情對話框。
 - `static/app.js`：API 輪詢、畫面狀態、戰情卡片與表單操作，無前端框架或打包流程。
 - `static/style.css`：深色響應式介面、桌面四台戰情總覽與全螢幕樣式。
@@ -34,6 +37,10 @@
 - `tests/test_agent.py`：Agent 指標、認證、來源限制及請求處理測試。
 - `tests/test_integration.py`：具備 psutil 時執行的真實 Agent 整合測試。
 - `tests/test_notifications.py`：SMTP 驗證／機密保存、異常恢復去重順序、有界佇列／重試、傳送逾時與接受結果不確定測試，不寄真實郵件。
+- `tests/test_windows_app.py`：隔離的 Windows 事件／單例鎖、系統匣選單、後端啟停／重啟、持久化、權限及連接埠衝突測試。`tests/windows_package_smoke.py` 驗證真實安裝／解除安裝與 frozen 後端，不使用正式設定或 8080。
+- `tests/windows_ui_smoke.py`：真實 WebView2／系統匣載入、關閉隱藏、重開與離開測試；使用臨時設定與隨機回環連接埠，不修改正式 Docker 或桌面設定。
+- Windows 維護注意：桌面 HTTP Handler 動態為 HTML 靜態資源與 `app.js` API 請求加上工作階段路徑，避免後端停止後舊頁面連入其他管理端。修改 `static/app.js` 的 `fetch(path, options)` 呼叫形式時，須同步更新轉換與隔離測試；不相符時桌面腳本拒絕載入。pywebview 固定 6.2.1，升級須重驗 WebView2 renderer 與 Windows SessionEnding 行為。
+- `packaging/licenses/WebView2-SDK/` 保留已隨程式散布之 SDK 1.0.3856.49 的官方授權、NOTICE 與來源，須提交 Git；其他相依授權由 `collect_licenses.py` 在建置時收集。SDK DLL 與系統 WebView2 Runtime 不同，Runtime 仍需由使用者另外安裝。
 - `tests/browser_smoke.mjs`：使用 Chrome／Edge DevTools Protocol 的瀏覽器操作測試，無 npm 相依套件。
 - `README.md`：使用者啟動、部署與 Agent 安裝說明。
 
@@ -188,7 +195,9 @@ docker compose config --quiet
 
 目前已驗證：
 
-- Windows 本機 73 項 Python 測試通過（含真實 Agent 整合測試及通知測試）。
+- 2026-11-24 WebView2 改版：12 項隔離桌面測試及真實 WebView2 載入／隱藏／重開／離開測試通過；frozen 後端與保存測試通過。現有桌面安裝已存在，本輪未覆寫其登錄或執行安裝／解除安裝測試，未切換正式 Docker。完整開發環境 85 項測試完成（缺少桌面套件略過 3 項）。
+- Windows 本機 80 項 Python 測試完成（含真實 Agent 整合測試及通知測試，原開發 venv 缺 pystray 時略過 1 項選單測試）。獨立 Windows 建置環境另驗證全部 7 項桌面測試通過。
+- Windows x64 安裝包已完成真實隔離安裝、靜態資源／API、啟動／停止／重啟及保存、解除安裝保留設定測試；未切換或停止正式 Docker。未宣稱已在無 Python 的全新 Windows 主機驗收，尚未數位簽章。
 - Docker Linux 映像內管理端 21 項測試已通過；通知測試更新後 24 項通過。
 - Gmail 設定介面、密碼留空保留／明確清除、測試排程與手機對話框已通過瀏覽器測試。使用者已設定並確認收到 Gmail 測試信，帳密不可輸出。
 - 異常信以繁體中文說明失敗項目、可能原因及建議，包括 TCP／HTTP、Agent 認證／指標與系統服務狀態；不輸出原始錯誤或 HTTP URL，未知服務狀態不視為已確認停止。

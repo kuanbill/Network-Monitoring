@@ -1,0 +1,51 @@
+; Project-authored Traditional Chinese overrides; uncommon errors use Inno's English defaults.
+[LangOptions]
+LanguageName=繁體中文
+LanguageID=$0404
+LanguageCodePage=0
+DialogFontName=Microsoft JhengHei UI
+
+[Messages]
+SetupAppTitle=安裝程式
+SetupWindowTitle=安裝 - %1
+UninstallAppTitle=解除安裝
+UninstallAppFullTitle=解除安裝 %1
+InformationTitle=資訊
+ConfirmTitle=確認
+ErrorTitle=錯誤
+SetupLdrStartupMessage=即將安裝 %1，是否繼續？
+SetupAlreadyRunning=安裝程式已在執行。
+ExitSetupTitle=離開安裝程式
+ExitSetupMessage=安裝尚未完成，現在離開將不會完成安裝。%n%n是否離開？
+ButtonBack=< 上一步(&B)
+ButtonNext=下一步(&N) >
+ButtonInstall=安裝(&I)
+ButtonOK=確定
+ButtonCancel=取消
+ButtonYes=是(&Y)
+ButtonNo=否(&N)
+ButtonFinish=完成(&F)
+ButtonBrowse=瀏覽(&B)...
+ButtonWizardBrowse=瀏覽(&R)...
+ButtonNewFolder=建立資料夾(&M)
+ClickNext=按「下一步」繼續，或按「取消」離開。
+WelcomeLabel1=歡迎使用 [name] 安裝精靈
+WelcomeLabel2=這將在您的電腦安裝 [name/ver]。%n%n建議先關閉其他程式再繼續。
+WizardSelectDir=選擇安裝位置
+SelectDirDesc=您要將 [name] 安裝在哪裡？
+SelectDirLabel3=安裝程式將把 [name] 安裝到下列資料夾。
+WizardSelectTasks=選擇附加工作
+SelectTasksDesc=您要執行哪些附加工作？
+SelectTasksLabel2=選擇要執行的附加工作，然後按「下一步」。
+WizardReady=準備安裝
+ReadyLabel1=安裝程式已準備好在您的電腦安裝 [name]。
+ReadyLabel2a=按「安裝」開始安裝，或按「上一步」檢查設定。
+WizardInstalling=正在安裝
+InstallingLabel=正在安裝 [name]，請稍候。
+FinishedHeadingLabel=完成 [name] 安裝精靈
+FinishedLabelNoIcons=已完成 [name] 安裝。
+FinishedLabel=已完成 [name] 安裝。您可從開始功能表啟動程式。
+ClickFinish=按「完成」結束安裝。
+ConfirmUninstall=確定要移除 %1 及其所有元件嗎？使用者監控設定不會被刪除。
+UninstallStatusLabel=正在移除 %1，請稍候。
+UninstalledAll=%1 已成功移除。
