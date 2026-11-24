@@ -89,6 +89,30 @@ try {
   await evaluate(`document.querySelector('#host-dialog').close()`);
   await command('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});
   assert.equal(await evaluate(`document.documentElement.scrollWidth<=innerWidth`), true, 'mobile layout must fit');
+  // Email settings use only the temporary server; never send a real test email.
+  await evaluate(`document.querySelector('#nav-notifications').click()`);
+  await until(() => evaluate(`!document.querySelector('#save-notification').disabled`), 'email settings loaded');
+  assert.equal(await evaluate(`document.querySelector('#mail-host').value`), 'smtp.gmail.com');
+  assert.equal(await evaluate(`document.querySelector('#mail-port').value`), '587');
+  assert.equal(await evaluate(`document.querySelector('#notification-enabled').checked`), false);
+  assert.equal(await evaluate(`document.querySelector('#notification-dialog').scrollWidth<=document.querySelector('#notification-dialog').clientWidth`), true, 'email dialog fits mobile');
+  await evaluate(`document.querySelector('#mail-username').value='smoke@gmail.com'; document.querySelector('#mail-sender').value='smoke@gmail.com'; document.querySelector('#mail-recipients').value='admin@example.com'; document.querySelector('#mail-password').value='fake-smoke-password'; document.querySelector('#save-notification').click()`);
+  await until(async () => (await (await fetch(base + '/api/notifications')).json()).password_set, 'email secret saved');
+  await until(() => evaluate(`!document.querySelector('#save-notification').disabled && document.querySelector('#mail-password').value===''`), 'email secret cleared from form');
+  const mailPublic = await (await fetch(base + '/api/notifications')).json();
+  assert.ok(!JSON.stringify(mailPublic).includes('fake-smoke-password'), 'email secret must be write-only');
+  await evaluate(`document.querySelector('#notification-dialog').close(); document.querySelector('#nav-notifications').click()`);
+  await until(() => evaluate(`!document.querySelector('#save-notification').disabled`), 'email settings reopened');
+  assert.equal(await evaluate(`document.querySelector('#mail-password').value`), '');
+  await evaluate(`document.querySelector('#save-notification').click()`);
+  await until(() => evaluate(`!document.querySelector('#save-notification').disabled`), 'email blank password save');
+  assert.equal((await (await fetch(base + '/api/notifications')).json()).password_set, true, 'blank password preserves secret');
+  await evaluate(`window.__mailFetch=window.fetch; window.__mailTests=0; window.fetch=(path,options)=>String(path)==='/api/notifications/test'?(window.__mailTests++,Promise.resolve(new Response(JSON.stringify({ok:true,message:'模擬測試已排程'}),{status:202}))):window.__mailFetch(path,options); document.querySelector('#test-notification').click()`);
+  await until(() => evaluate(`window.__mailTests===1 && !document.querySelector('#test-notification').disabled`), 'email test queued');
+  await evaluate(`window.fetch=window.__mailFetch; document.querySelector('#mail-clear-password').click(); document.querySelector('#save-notification').click()`);
+  await until(async () => !(await (await fetch(base + '/api/notifications')).json()).password_set, 'email secret explicitly cleared');
+  await until(() => evaluate(`!document.querySelector('#save-notification').disabled`), 'email clear completed');
+  await evaluate(`document.querySelector('#notification-dialog').close()`);
   // Keep fixture data inside this page; never modify deployed hosts or saved tokens.
   const fixture = {interval:30, hosts:Array.from({length:4}, (_, index) => ({
     id:`fixture-${index}`, name:`Fixture ${index}`, ip:`192.168.8.${index+1}`, agent_enabled:index!==3, history:[],
@@ -129,7 +153,7 @@ try {
   await until(() => evaluate(`!document.querySelector('#state-error').hidden`),'connection failure warning');
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('#state-error')).display!=='none'`),true,'stale-data warning remains visible in wall mode');
   assert.deepEqual(errors, []);
-  console.log('PASS: existing host/scan workflows, metrics board, safe rendering, missing agent, service failure, filters, details, list toggle, mobile and four-host desktop wall');
+  console.log('PASS: host/scan workflows, Gmail settings/secret preservation/clearing/test queue, metrics board, safe rendering, missing agent, service failure, filters, details, list toggle, mobile and four-host desktop wall');
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {
     try { console.error('Browser diagnostic:', await evaluate(`JSON.stringify({hostError:document.querySelector('#host-form-error').textContent,scanError:document.querySelector('#scan-error').textContent,scanStatus:document.querySelector('#scan-status').textContent,scanRange:document.querySelector('#scan-range').value,scanPorts:document.querySelector('#scan-ports').value})`)); } catch {}

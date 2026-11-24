@@ -8,7 +8,8 @@
     stateBusy: false, stateAgain: false, stateError: false, hostSignature: null,
     detailSignature: null, extraChecks: [], formPending: false, scanBusy: false, scanStarting: false,
     adding: false, scan: { running: false, progress: 0, total: 0, results: [] },
-    selected: new Set(), scanSignature: null, scanTimer: null, addFailures: ''
+    selected: new Set(), scanSignature: null, scanTimer: null, addFailures: '',
+    notificationBusy: false, notificationLoaded: false, notificationTimer: null
   };
 
   // All API data enters the DOM as text or DOM properties, never HTML.
@@ -748,8 +749,103 @@
     await loadState();
   }
 
+  const mailFields = { smtp_host: 'mail-host', smtp_port: 'mail-port', security: 'mail-security',
+    username: 'mail-username', sender: 'mail-sender', failure_threshold: 'mail-failure-threshold',
+    recovery_threshold: 'mail-recovery-threshold' };
+  function renderDelivery(data) {
+    const names = { idle: '尚無寄送紀錄', queued: '測試信已排程', sending: '正在寄送',
+      sent: 'SMTP 已接受郵件，請檢查收件匣／垃圾郵件', partial: '部分收件人被拒絕',
+      failed: '寄送失敗', timeout: '寄送逾時，結果未確定', uncertain: 'SMTP 接受結果未確定，不自動重寄' };
+    const delivery = data.delivery || {};
+    $('notification-status').textContent = `${data.enabled ? '異常通知已啟用' : '異常通知未啟用'} · ${names[delivery.status] || '未知寄送狀態'}${delivery.timestamp ? ` · ${dateText(delivery.timestamp)}` : ''}${delivery.pending ? ` · 等待 ${delivery.pending} 封` : ''}${delivery.error ? `。${delivery.error}` : ''}`;
+  }
+  function mailBusy(busy) {
+    model.notificationBusy = busy;
+    $('notification-fields').disabled = busy || !model.notificationLoaded;
+    $('save-notification').disabled = busy || !model.notificationLoaded;
+    $('test-notification').disabled = busy || !model.notificationLoaded;
+  }
+  async function openNotifications() {
+    if (model.notificationBusy) return;
+    model.notificationLoaded = false;
+    mailBusy(true);
+    $('notification-form').reset();
+    $('mail-password').value = '';
+    $('mail-password').disabled = false;
+    showError('notification-error', '');
+    $('notification-status').textContent = '正在載入設定…';
+    $('notification-dialog').showModal();
+    try {
+      const data = await api('/api/notifications');
+      for (const [key, id] of Object.entries(mailFields)) $(id).value = data[key];
+      $('notification-enabled').checked = data.enabled;
+      $('mail-notify-recovery').checked = data.notify_recovery;
+      $('mail-recipients').value = data.recipients.join('\n');
+      $('mail-password-help').textContent = data.password_set ? '已儲存密碼；留空保留原值，勾選下方可清除。' : '尚未設定密碼；Gmail 請使用應用程式密碼。';
+      model.notificationLoaded = true;
+      renderDelivery(data);
+    } catch (error) { showError('notification-error', error.message); }
+    finally { mailBusy(false); }
+    clearInterval(model.notificationTimer);
+    model.notificationTimer = setInterval(async () => {
+      if (!$('notification-dialog').open || model.notificationBusy) return;
+      try { renderDelivery(await api('/api/notifications')); }
+      catch (error) { $('notification-status').textContent = `無法更新寄送狀態：${error.message}`; }
+    }, 3000);
+  }
+  async function saveNotifications(event) {
+    event.preventDefault();
+    if (model.notificationBusy || !model.notificationLoaded) return;
+    const test = event.submitter?.id === 'test-notification';
+    const data = {};
+    for (const [key, id] of Object.entries(mailFields)) data[key] = $(id).value.trim();
+    for (const key of ['smtp_port', 'failure_threshold', 'recovery_threshold']) data[key] = Number(data[key]);
+    data.enabled = $('notification-enabled').checked;
+    data.notify_recovery = $('mail-notify-recovery').checked;
+    data.recipients = $('mail-recipients').value.split(/[,;\n]+/).map((value) => value.trim()).filter(Boolean);
+    if ($('mail-clear-password').checked) data.password = '';
+    else if ($('mail-password').value) data.password = $('mail-password').value;
+    mailBusy(true);
+    showError('notification-error', '');
+    try {
+      const saved = await api('/api/notifications', 'PUT', data);
+      $('mail-password').value = '';
+      $('mail-clear-password').checked = false;
+      $('mail-password').disabled = false;
+      $('mail-password-help').textContent = saved.password_set ? '已儲存密碼；留空保留原值，勾選下方可清除。' : '尚未設定密碼。';
+      renderDelivery(saved);
+      if (test) {
+        const result = await api('/api/notifications/test', 'POST', {});
+        toast(result.message);
+        renderDelivery(await api('/api/notifications'));
+      } else toast('郵件通知設定已儲存');
+    } catch (error) { showError('notification-error', error.message); }
+    finally { mailBusy(false); }
+  }
+  $('nav-notifications').addEventListener('click', openNotifications);
+  $('notification-form').addEventListener('submit', saveNotifications);
+  $('gmail-preset').addEventListener('click', () => {
+    $('mail-host').value = 'smtp.gmail.com';
+    $('mail-port').value = '587';
+    $('mail-security').value = 'starttls';
+    if (!$('mail-sender').value) $('mail-sender').value = $('mail-username').value;
+  });
+  $('mail-username').addEventListener('change', () => {
+    if (!$('mail-sender').value && $('mail-host').value === 'smtp.gmail.com') $('mail-sender').value = $('mail-username').value;
+  });
+  $('mail-clear-password').addEventListener('change', () => {
+    $('mail-password').disabled = $('mail-clear-password').checked;
+    if ($('mail-clear-password').checked) $('mail-password').value = '';
+  });
+  $('notification-dialog').addEventListener('cancel', (event) => { if (model.notificationBusy) event.preventDefault(); });
+  $('notification-dialog').addEventListener('close', () => {
+    $('mail-password').value = '';
+    clearInterval(model.notificationTimer);
+  });
+
   document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => {
     if (button.dataset.close === 'host-dialog' && model.formPending) return;
+    if (button.dataset.close === 'notification-dialog' && model.notificationBusy) return;
     $(button.dataset.close).close();
   }));
   $('host-dialog').addEventListener('cancel', (event) => { if (model.formPending) event.preventDefault(); });

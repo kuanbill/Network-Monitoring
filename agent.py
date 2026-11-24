@@ -37,6 +37,9 @@ MAX_SERVICES = 32
 MAX_DISKS = 128
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_CLIENTS = 8
+COLLECTION_WAIT = 0.75
+COLLECTION_INTERVAL = 5
+MAX_SNAPSHOT_AGE = 15
 
 
 def validate_token(token):
@@ -80,6 +83,11 @@ def service_status(name):
     return "unknown"
 
 
+def display_text(value, maximum):
+    # POSIX filenames may contain surrogateescape code points; keep valid UTF-8 labels.
+    return str(value).encode('utf-8', errors='replace').decode('utf-8')[:maximum]
+
+
 def collect_metrics(services=()):
     if psutil is None:
         raise RuntimeError("psutil is required to collect metrics")
@@ -96,17 +104,76 @@ def collect_metrics(services=()):
             usage = psutil.disk_usage(mountpoint)
         except (OSError, psutil.Error):
             continue
-        disks.append({"mountpoint": mountpoint[:512], "total": usage.total,
+        disks.append({"mountpoint": display_text(mountpoint, 512), "total": usage.total,
                       "used": usage.used, "percent": usage.percent})
     return {
-        "hostname": socket.gethostname()[:512],
-        "os": platform.system()[:128],
+        "hostname": display_text(socket.gethostname(), 512),
+        "os": display_text(platform.system(), 128),
         "cpu_percent": cpu,
         "memory": {"percent": memory.percent, "total": memory.total, "used": memory.used},
         "disks": disks,
         "uptime_seconds": max(0, time.time() - psutil.boot_time()),
         "services": [{"name": name, "status": service_status(name)} for name in services],
     }
+
+
+class MetricsCollector:
+    """Single-flight daemon collection; a stalled OS query never owns an HTTP slot.
+
+    No replacement workers are spawned while a collection is stuck. Cached data
+    expires based on the start of collection, not when a slow query finally ends.
+    """
+
+    def __init__(self, services):
+        self.services = services
+        self.condition = threading.Condition()
+        self.running = False
+        self.closed = False
+        self.snapshot = None
+        self.started = 0
+        self.worker = None
+
+    def _collect(self):
+        while True:
+            started = time.monotonic()
+            try:
+                snapshot = collect_metrics(self.services)
+            except Exception:
+                snapshot = None
+            with self.condition:
+                self.running = False
+                if not self.closed:
+                    self.snapshot = snapshot
+                    self.started = started
+                self.condition.notify_all()
+                if self.condition.wait_for(lambda: self.closed, COLLECTION_INTERVAL):
+                    return
+                self.running = True
+
+    def get(self):
+        with self.condition:
+            if self.closed:
+                raise RuntimeError('metrics unavailable')
+            if self.worker is None:
+                self.running = True
+                self.worker = threading.Thread(target=self._collect, daemon=True)
+                try:
+                    self.worker.start()
+                except Exception:
+                    self.running = False
+                    self.worker = None
+                    raise
+            if self.snapshot is None or time.monotonic() - self.started > MAX_SNAPSHOT_AGE:
+                self.condition.wait_for(lambda: not self.running or self.closed, COLLECTION_WAIT)
+            if self.closed or self.snapshot is None or time.monotonic() - self.started > MAX_SNAPSHOT_AGE:
+                raise RuntimeError('metrics unavailable')
+            return self.snapshot
+
+    def close(self):
+        with self.condition:
+            self.closed = True
+            self.snapshot = None
+            self.condition.notify_all()
 
 
 class AgentServer(ThreadingHTTPServer):
@@ -122,7 +189,12 @@ class AgentServer(ThreadingHTTPServer):
         if psutil is None:
             raise RuntimeError("Install optional agent dependencies: pip install -r requirements-agent.txt")
         self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        self.collector = MetricsCollector(self.services)
         super().__init__(address, MetricsHandler)
+
+    def server_close(self):
+        self.collector.close()
+        super().server_close()
 
     def get_request(self):
         request, address = super().get_request()
@@ -209,7 +281,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not found"})
             return
         try:
-            metrics = collect_metrics(self.server.services)
+            metrics = self.server.collector.get()
             self.send_json(200, metrics)
         except Exception:
             self.send_json(503, {"error": "metrics unavailable"})

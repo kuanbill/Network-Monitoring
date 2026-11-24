@@ -10,14 +10,18 @@ from pathlib import Path
 import socket
 import subprocess
 import threading
+import tempfile
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
+from notifications import NotificationManager
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8')]
 TIMEOUT = 1.5
+MAX_CLIENTS = 32
+REQUEST_DEADLINE = 10
 
 
 def valid_ip(value):
@@ -153,23 +157,27 @@ def validate_metrics(metrics):
         raise ValueError('代理程式資料格式錯誤')
     json.dumps(metrics, allow_nan=False, ensure_ascii=False).encode('utf-8')
     for key in ('hostname', 'os'):
-        if key in metrics and not isinstance(metrics[key], str):
+        if not isinstance(metrics.get(key), str) or not metrics[key]:
             raise ValueError('代理程式文字欄位格式錯誤')
+
     def numbers(obj, keys):
         for key in keys:
-            if key in obj and (isinstance(obj[key], bool) or not isinstance(obj[key], (int, float))):
+            value = obj.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise ValueError('代理程式數值欄位格式錯誤')
+            if key in ('percent', 'cpu_percent') and value > 100:
+                raise ValueError('代理程式百分比須為 0–100')
+
     numbers(metrics, ('cpu_percent', 'uptime_seconds'))
-    if 'memory' in metrics:
-        if not isinstance(metrics['memory'], dict):
-            raise ValueError('代理程式記憶體欄位格式錯誤')
-        numbers(metrics['memory'], ('percent', 'total', 'used'))
+    if not isinstance(metrics.get('memory'), dict):
+        raise ValueError('代理程式記憶體欄位格式錯誤')
+    numbers(metrics['memory'], ('percent', 'total', 'used'))
     for key, maximum, text_fields in [('disks', 128, ('mountpoint',)), ('services', 32, ('name', 'status'))]:
-        items = metrics.get(key, [])
+        items = metrics.get(key)
         if not isinstance(items, list) or len(items) > maximum:
             raise ValueError('代理程式清單格式錯誤')
         for item in items:
-            if not isinstance(item, dict) or any(field in item and not isinstance(item[field], str) for field in text_fields):
+            if not isinstance(item, dict) or any(not isinstance(item.get(field), str) or not item[field] for field in text_fields):
                 raise ValueError('代理程式清單項目格式錯誤')
             if key == 'disks':
                 numbers(item, ('percent', 'total', 'used'))
@@ -222,6 +230,7 @@ def inspect_host(host):
 class Monitor:
     def __init__(self, data_dir, interval=30):
         self.path = Path(data_dir) / 'hosts.json'
+        self.notifications = NotificationManager(data_dir)
         self.lock = threading.RLock()
         self.cycle_lock = threading.Lock()
         self.interval = interval
@@ -235,13 +244,17 @@ class Monitor:
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(self.hosts, ensure_ascii=False, indent=2), encoding='utf-8')
+        # mkstemp creates a unique file with mode 0600 before any secrets are written.
+        descriptor, name = tempfile.mkstemp(prefix='hosts-', suffix='.tmp', dir=self.path.parent)
+        temporary = Path(name)
         try:
-            os.chmod(temporary, 0o600)
-        except OSError:
-            pass
-        os.replace(temporary, self.path)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                json.dump(self.hosts, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def state(self):
         with self.lock:
@@ -281,6 +294,9 @@ class Monitor:
             except (OSError, ValueError):
                 self.hosts, self.states = old_hosts, old_states
                 raise
+            if delete or (previous and any(previous[key] != host[key] for key in
+                                           ('ip', 'checks', 'agent_enabled', 'agent_port', 'agent_token'))):
+                self.notifications.forget(identity)
         self.wake.set()
         return result
 
@@ -304,6 +320,7 @@ class Monitor:
                         state['last'] = last
                         state['history'].append({k: last[k] for k in ('timestamp', 'status', 'latency_ms')})
                         state['history'] = state['history'][-120:]
+                        self.notifications.observe(host, last)
 
     def loop(self):
         while not self.stop.is_set():
@@ -357,6 +374,23 @@ class Monitor:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        # Cover request line, headers and body, including clients that trickle bytes.
+        self.request_deadline = threading.Timer(self.server.request_deadline, self.expire_request)
+        self.request_deadline.daemon = True
+        self.request_deadline.start()
+
+    def expire_request(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def finish(self):
+        self.request_deadline.cancel()
+        super().finish()
+
     def log_message(self, fmt, *args):
         # Never log request bodies / tokens.
         super().log_message(fmt, *args)
@@ -392,6 +426,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == '/api/state':
             return self.send_json(200, self.server.monitor.state())
+        if path == '/api/notifications':
+            return self.send_json(200, self.server.monitor.notifications.public())
         if path == '/api/scan':
             with self.server.monitor.lock:
                 snapshot = copy.deepcopy(self.server.monitor.scan)
@@ -426,6 +462,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('請求須為 JSON 物件')
             path = urlsplit(self.path).path
             monitor = self.server.monitor
+            if path == '/api/notifications' and self.command == 'PUT':
+                return self.send_json(200, monitor.notifications.update(data))
+            if path == '/api/notifications/test' and self.command == 'POST':
+                return self.send_json(202, monitor.notifications.test())
             if path == '/api/hosts' and self.command == 'POST':
                 return self.send_json(201, monitor.change(data))
             if path.startswith('/api/hosts/') and self.command in ('PUT', 'DELETE'):
@@ -450,6 +490,33 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = MAX_CLIENTS
+    request_deadline = REQUEST_DEADLINE
+
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def server_close(self):
+        if hasattr(self, 'monitor'):
+            self.monitor.notifications.close()
+        super().server_close()
 
     def get_request(self):
         connection, address = super().get_request()

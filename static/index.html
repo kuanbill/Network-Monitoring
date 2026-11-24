@@ -30,7 +30,7 @@
   <aside class="sidebar">
     <a class="brand" href="./" aria-label="LANscope 首頁"><span class="brand-mark"><svg class="icon"><use href="#i-pulse"/></svg></span><span>LAN<span class="brand-light">scope</span><small>NETWORK MONITOR</small></span></a>
     <div class="nav-label">工作空間</div>
-    <nav aria-label="主要導覽"><a class="nav-item active" href="#overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>監測總覽<span class="nav-count" id="nav-count">0</span></a><button class="nav-item" id="nav-scan"><svg class="icon"><use href="#i-scan"/></svg>探索區域網路</button></nav>
+    <nav aria-label="主要導覽"><a class="nav-item active" href="#overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>監測總覽<span class="nav-count" id="nav-count">0</span></a><button class="nav-item" id="nav-scan"><svg class="icon"><use href="#i-scan"/></svg>探索區域網路</button><button class="nav-item" id="nav-notifications" aria-label="郵件通知設定"><svg class="icon"><use href="#i-alert"/></svg>郵件通知</button></nav>
     <div class="sidebar-bottom"><span class="local-dot"></span><div>私有網路・集中監測<small>讓每一次連線，都清楚可見。</small></div></div>
   </aside>
 
@@ -72,6 +72,31 @@
         <div class="error-banner" id="host-form-error" role="alert" hidden></div>
       </div>
       <div class="modal-footer"><button type="button" class="button secondary" data-close="host-dialog">取消</button><button type="submit" class="button primary" id="save-host">儲存主機</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="notification-dialog" class="modal" aria-labelledby="notification-title">
+    <form id="notification-form">
+      <div class="modal-header"><div><div class="eyebrow">EMAIL NOTIFICATIONS</div><h2 id="notification-title">郵件通知設定</h2><p>連續異常才通知，同一事件不重複寄信。</p></div><button type="button" class="icon-button" data-close="notification-dialog" aria-label="關閉"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div class="modal-body form-stack">
+        <fieldset id="notification-fields" class="form-stack" disabled>
+          <label class="checkbox-label"><input id="notification-enabled" type="checkbox">啟用主機異常通知（部分異常／無法連線）</label>
+          <div><button class="button secondary" id="gmail-preset" type="button">使用 Gmail 預設</button><p class="field-help">Gmail：開啟兩步驟驗證後，建立 16 字元「應用程式密碼」，輸入時移除空白；不是一般 Google 登入密碼。Workspace 帳號須由管理員允許此功能。</p></div>
+          <div class="form-row"><label>SMTP 主機<input id="mail-host" maxlength="253" required placeholder="smtp.gmail.com" autocomplete="off"></label><label>連接埠<input id="mail-port" type="number" min="1" max="65535" required></label></div>
+          <label>加密方式<select id="mail-security"><option value="starttls">STARTTLS（Gmail 587）</option><option value="ssl">TLS（Gmail 465）</option></select></label>
+          <label>SMTP 登入帳號<input id="mail-username" maxlength="254" placeholder="yourname@gmail.com" autocomplete="off"></label>
+          <label>SMTP 密碼／Gmail 應用程式密碼<input id="mail-password" type="password" maxlength="1024" autocomplete="new-password"><span class="field-help" id="mail-password-help">密碼只供寫入，不會回傳。</span></label>
+          <label class="checkbox-label"><input id="mail-clear-password" type="checkbox">清除已儲存的密碼</label>
+          <label>寄件 Email<input id="mail-sender" type="email" maxlength="254" placeholder="通常與 Gmail 登入帳號相同"><span class="field-help">Gmail 請使用登入帳號或已驗證的寄件別名。</span></label>
+          <label>收件 Email<textarea id="mail-recipients" rows="3" maxlength="5100" placeholder="admin@example.com&#10;ops@example.com"></textarea><span class="field-help">每行一位或使用逗號分隔，最多 20 位。</span></label>
+          <div class="form-row"><label>連續異常幾次才通知<input id="mail-failure-threshold" type="number" min="1" max="10" required></label><label>連續正常幾次確認恢復<input id="mail-recovery-threshold" type="number" min="1" max="10" required></label></div>
+          <label class="checkbox-label"><input id="mail-notify-recovery" type="checkbox">恢復正常時寄送通知</label>
+          <p class="field-help">次數以完成的監測輪次計算，不是畫面更新次數。寄送失敗每隔至少 60 秒重試，單封最多 3 次；重啟管理端或修改通知設定後重新累積事件。SMTP 接受郵件不保證已送達收件匣。</p>
+        </fieldset>
+        <p id="notification-status" class="section-caption" role="status">正在載入設定…</p>
+        <div id="notification-error" class="error-banner" role="alert" hidden></div>
+      </div>
+      <div class="modal-footer notification-footer"><button type="button" class="button secondary" data-close="notification-dialog">關閉</button><button type="submit" class="button secondary" id="test-notification" disabled>儲存並寄測試信</button><button type="submit" class="button primary" id="save-notification" disabled>儲存設定</button></div>
     </form>
   </dialog>
 

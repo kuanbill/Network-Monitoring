@@ -4,7 +4,7 @@
 
 提供 Windows／Linux 區網主機探索、集中服務監控與 Agent 主機指標。介面使用繁體中文。
 
-目前管理端已部署在本機 Docker Desktop，專案目錄為 `E:\netword`，網址為 **http://127.0.0.1:8080**。原本直接執行的 Python 管理程序已停止，請勿同時啟動兩個管理程序共用設定檔。
+目前管理端已部署在本機 Docker Desktop，專案目錄為 `E:\netword-monitor`，網址為 **http://127.0.0.1:8080**。原本直接執行的 Python 管理程序已停止，請勿同時啟動兩個管理程序共用設定檔。
 
 目前五台主機均已部署 Agent，各台已完成連線驗證：
 
@@ -22,15 +22,18 @@
 
 - `server.py`：Python 標準函式庫 HTTP 管理端、設定保存、背景監控、區網探索及 API。
 - `agent.py`：在被監控主機上執行，透過 psutil 提供 CPU、記憶體、磁碟、運行時間及指定系統服務狀態。
+- `notifications.py`：SMTP 設定驗證與安全原子保存、異常／恢復狀態機、單一背景寄信工作與有界佇列，僅 Python 標準函式庫。
 - `requirements-agent.txt`：Agent 相依套件，psutil 版本範圍 `>=6,<8`。
 - `static/index.html`：單頁介面與設定、探索、詳情對話框。
 - `static/app.js`：API 輪詢、畫面狀態、戰情卡片與表單操作，無前端框架或打包流程。
 - `static/style.css`：深色響應式介面、桌面四台戰情總覽與全螢幕樣式。
 - `Dockerfile`、`compose.yaml`、`.dockerignore`：管理端映像與本機部署設定。
 - `data/hosts.json`：主機設定與 Agent Token；屬機密資料，不可提交版本控制或打包進映像。
+- `data/notifications.json`：通知設定與明文 SMTP 密碼，同屬機密資料；密碼只供寫入，省略保留、空字串清除，API 僅回傳 `password_set`。
 - `tests/test_server.py`：管理端驗證、狀態判定、HTTP 安全、保存與逾時測試。
 - `tests/test_agent.py`：Agent 指標、認證、來源限制及請求處理測試。
 - `tests/test_integration.py`：具備 psutil 時執行的真實 Agent 整合測試。
+- `tests/test_notifications.py`：SMTP 驗證／機密保存、異常恢復去重順序、有界佇列／重試、傳送逾時與接受結果不確定測試，不寄真實郵件。
 - `tests/browser_smoke.mjs`：使用 Chrome／Edge DevTools Protocol 的瀏覽器操作測試，無 npm 相依套件。
 - `README.md`：使用者啟動、部署與 Agent 安裝說明。
 
@@ -38,7 +41,7 @@
 
 ## 3. 本機 Docker 維護
 
-在 `E:\netword` 執行：
+在 `E:\netword-monitor` 執行：
 
 ```powershell
 docker compose up -d --build
@@ -52,7 +55,8 @@ docker compose down
 - Compose 專案為 `netword`，服務為 `monitor`，映像為 `netword-monitor:local`。
 - 僅發佈 `127.0.0.1:8080:8080`，不可隨意改為對所有網卡開放。
 - 容器內使用 `--bind 0.0.0.0` 接收 Docker 轉送；原生 Python 預設仍只綁定 `127.0.0.1`。
-- `./data` 綁定掛載到 `/app/data`。重建映像不會清除設定。
+- `./data` 綁定掛載到 `/app/data`。重建映像不會清除設定。實際來源應為 `E:\netword-monitor\data`；不要從舊的 `E:\netword` 目錄重建，以免掛載空目錄或產生寫入權限問題。
+- 2026-11-24 已修正舊目錄掛載問題，恢復既有五台主機與 Token；已驗證 API 保存、容器重啟後設定保留及五台 Agent 正常。修復前備份為 `data/hosts.pre-repair-*.json`，含機密 Token，不可提交。
 - 非 root UID/GID 為 `10001:10001`，根檔案系統唯讀，移除所有 capabilities，啟用 no-new-privileges。
 - 透過 `net.ipv4.ping_group_range` 允許非 root ICMP Ping，不應為此啟用 privileged 容器。
 - 根路徑之外的可寫位置為資料掛載與暫存 `/tmp`。
@@ -74,6 +78,8 @@ docker compose down
 - `POST /api/refresh`：安排背景立即檢查，不保證回應當下已完成量測。
 - `POST /api/scan`：提交 `{range, ports}` 探索工作。
 - `GET /api/scan`：取得探索進度、結果與錯誤。
+- `GET /api/notifications`、`PUT /api/notifications`：讀取公開通知設定／保存，預設停用，密碼不可回傳。
+- `POST /api/notifications/test`：使用已儲存設定排程測試信，回傳 202 不代表送達；GET 設定中的 `delivery` 顯示結果。每 30 秒最多一次。
 
 主機設定包含 `id`、`name`、`ip`、`checks`、`agent_enabled`、`agent_port`；Token 只供寫入，公開回應僅提供是否已設定，不回傳內容。編輯時省略 `agent_token` 會保留既有值，空字串代表清除，前端不可混淆。
 
@@ -161,8 +167,13 @@ Agent 程式修改不會自動更新遠端主機；需另行複製程式、更�
 - 不透過 Docker 群組繞過 sudo 權限限制；需要管理權限時請使用者執行必要的最小範圍指令。
 - HTTP 檢查 URL 必須使用被監控主機的 literal IP，不允許帳密或片段；不跟隨重新導向，HTTPS 驗證憑證。
 - 外部 Agent JSON 須拒絕非有限數值、非法 Unicode 及不合結構資料，避免破壞整體狀態 API。
-- 網路請求必須有總逾時，不可只依賴 socket 閒置逾時，避免慢速回應卡住監測週期。
-- 目前沒有異常通知、長期歷史資料庫、內建 TLS 或集中自動更新功能。
+- 網路請求必須有總逾時，不可只依賴 socket 閒置逾時，避免慢速回應卡住監測週期。管理端入站請求總期限 10 秒，同時連線上限 32。
+- Agent 使用單一背景收集工作，首次認證請求後啟動，每輪完成後等待 5 秒；HTTP 等待快照最多 0.75 秒，快照從收集開始計算最多有效 15 秒，未就緒／失敗／過期回傳 503。卡住的 OS 查詢不會佔滿 HTTP 工作或持續新增收集執行緒；若一直無法恢復，排除底層問題後需重啟 Agent。
+- 2026-11-24 已更新五台 Agent 並重啟服務／排程，程式備份為各安裝目錄的 `agent.py.pre-fix-*`。已修正非 UTF-8 顯示文字、快照收集隔離、管理端指標必要欄位／範圍驗證及安全暫存保存；五台更新後均重新驗證正常，Token 與來源限制未變更。
+- 郵件通知支援 Gmail `smtp.gmail.com:587` STARTTLS 或 465 TLS，需兩步驟驗證與應用程式密碼，不支援 OAuth；不允許明文 SMTP，驗證 TLS 憑證。
+- 通知依每輪完成量測計數，預設連續異常 2 次／恢復 2 次；同一事件不重複通知。單一 FIFO 寄送工作、256 封佇列、寄送期限 20 秒，異常／恢復失敗最多 3 次、相隔 60 秒。部分拒收或 SMTP 接受結果不確定不自動重寄。壅塞保留待排入恢復，可能合併反覆異常，非保證投遞系統。
+- 去重與待寄佇列僅在記憶體，重啟或變更通知設定後重新累積；刪除／變更主機連線設定取消該主機舊事件。停用無法撤回已進入 SMTP 的郵件。勿在日誌／錯誤回應輸出 SMTP 原始例外，可能含密碼或郵件內容。
+- 目前沒有長期歷史資料庫、內建管理介面 TLS 或集中自動更新功能。
 
 ## 8. 測試與驗收
 
@@ -177,8 +188,10 @@ docker compose config --quiet
 
 目前已驗證：
 
-- Windows 本機 38 項 Python 測試通過。
-- Docker Linux 映像內 16 項管理端測試通過。
+- Windows 本機 73 項 Python 測試通過（含真實 Agent 整合測試及通知測試）。
+- Docker Linux 映像內管理端 21 項測試已通過；通知測試更新後 24 項通過。
+- Gmail 設定介面、密碼留空保留／明確清除、測試排程與手機對話框已通過瀏覽器測試。使用者已設定並確認收到 Gmail 測試信，帳密不可輸出。
+- 異常信以繁體中文說明失敗項目、可能原因及建議，包括 TCP／HTTP、Agent 認證／指標與系統服務狀態；不輸出原始錯誤或 HTTP URL，未知服務狀態不視為已確認停止。
 - 真實瀏覽器：新增／刪除、探索與勾選加入、安全文字呈現、戰情指標、未知／失敗狀態、篩選、詳情、手機與桌面全螢幕。
 - Docker 部署：四台 Agent 均正常、ICMP／TCP 區網可達、單一指定主機探索成功、Host 防護有效。
 - Docker 重啟後四台設定與 Token 保持不變，資料目錄可寫，容器健康檢查通過。

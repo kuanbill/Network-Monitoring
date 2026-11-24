@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -108,6 +109,18 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result["disks"], [])
         self.assertEqual(result["uptime_seconds"], 0)
 
+    def test_surrogate_mountpoint_and_unicode_labels(self):
+        import server
+        original = '/mnt/磁碟\udcff'
+        self.ps.disk_partitions.return_value = [types.SimpleNamespace(mountpoint=original)]
+        with patch.object(agent.socket, 'gethostname', return_value='主機😀'), patch.object(agent.platform, 'system', return_value='Linux'):
+            metrics = agent.collect_metrics()
+        self.ps.disk_usage.assert_called_once_with(original)
+        self.assertEqual(metrics['hostname'], '主機😀')
+        self.assertEqual(metrics['disks'][0]['mountpoint'], '/mnt/磁碟?')
+        self.assertEqual(server.validate_metrics(json.loads(json.dumps(metrics))), metrics)
+        self.assertLessEqual(len(agent.display_text('\udcff' * 600, 512)), 512)
+
     def test_disk_limit(self):
         self.ps.disk_partitions.return_value = [types.SimpleNamespace(mountpoint=str(n)) for n in range(200)]
         self.assertEqual(len(agent.collect_metrics()["disks"]), agent.MAX_DISKS)
@@ -146,6 +159,131 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(agent.service_status("ssh"), "unknown")
 
 
+class CollectorTests(unittest.TestCase):
+    def test_stalled_collection_is_single_flight_and_recovers(self):
+        collector = agent.MetricsCollector(('ssh',))
+        entered = threading.Event()
+        release = threading.Event()
+        def stalled(services):
+            entered.set()
+            release.wait(3)
+            return {'fresh': True}
+        try:
+            with patch.object(agent, 'collect_metrics', side_effect=stalled) as collect, patch.object(agent, 'COLLECTION_WAIT', 0.02):
+                for _ in range(10):
+                    started = time.monotonic()
+                    with self.assertRaises(RuntimeError):
+                        collector.get()
+                    self.assertLess(time.monotonic() - started, 0.5)
+                self.assertTrue(entered.is_set())
+                collect.assert_called_once_with(('ssh',))
+                release.set()
+                with collector.condition:
+                    self.assertTrue(collector.condition.wait_for(lambda: not collector.running, 2))
+                self.assertEqual(collector.get(), {'fresh': True})
+        finally:
+            release.set()
+            collector.close()
+
+    def test_stale_snapshot_and_late_collection_are_rejected(self):
+        collector = agent.MetricsCollector(())
+        collector.snapshot = {'stale': True}
+        collector.started = time.monotonic() - agent.MAX_SNAPSHOT_AGE - 1
+        entered = threading.Event()
+        release = threading.Event()
+        def stalled(services):
+            entered.set()
+            release.wait(3)
+            return {'late': True}
+        try:
+            with patch.object(agent, 'collect_metrics', side_effect=stalled), patch.object(agent, 'COLLECTION_WAIT', 0.02):
+                with self.assertRaises(RuntimeError):
+                    collector.get()
+                self.assertTrue(entered.is_set())
+                # A late result must retain the original collection start time.
+                with patch.object(agent, 'MAX_SNAPSHOT_AGE', 0):
+                    release.set()
+                    with collector.condition:
+                        self.assertTrue(collector.condition.wait_for(lambda: not collector.running, 2))
+                    with self.assertRaises(RuntimeError):
+                        collector.get()
+        finally:
+            release.set()
+            collector.close()
+
+    def test_periodic_refresh_survives_slow_collection_and_sparse_polls(self):
+        collector = agent.MetricsCollector(())
+        def slow(services):
+            time.sleep(0.03)  # Successful, but longer than the HTTP wait budget.
+            return {'fresh': True}
+        try:
+            with patch.object(agent, 'collect_metrics', side_effect=slow) as collect, \
+                    patch.object(agent, 'COLLECTION_WAIT', 0.005), \
+                    patch.object(agent, 'COLLECTION_INTERVAL', 0.02), \
+                    patch.object(agent, 'MAX_SNAPSHOT_AGE', 0.12):
+                with self.assertRaises(RuntimeError):
+                    collector.get()
+                for _ in range(3):
+                    time.sleep(0.16)  # Poll less frequently than snapshot expiry.
+                    self.assertEqual(collector.get(), {'fresh': True})
+                self.assertGreater(collect.call_count, 3)
+                collector.close()
+                collector.worker.join(timeout=1)
+                self.assertFalse(collector.worker.is_alive())
+        finally:
+            collector.close()
+
+    def test_close_is_bounded_and_unblocks_waiters(self):
+        collector = agent.MetricsCollector(())
+        entered = threading.Event()
+        release = threading.Event()
+        waiting = threading.Event()
+        failures = []
+        waiter_count = 0
+        original_wait = collector.condition.wait_for
+        def observed_wait(predicate, timeout=None):
+            nonlocal waiter_count
+            waiter_count += 1  # All callers hold the condition lock here.
+            if waiter_count == agent.MAX_CLIENTS:
+                waiting.set()
+            return original_wait(predicate, timeout)
+        def stalled(services):
+            entered.set()
+            release.wait(5)
+            return {'late': True}
+        def request():
+            try:
+                collector.get()
+            except RuntimeError:
+                failures.append(True)
+        callers = [threading.Thread(target=request) for _ in range(agent.MAX_CLIENTS)]
+        try:
+            with patch.object(agent, 'collect_metrics', side_effect=stalled), \
+                    patch.object(agent, 'COLLECTION_WAIT', 3), \
+                    patch.object(collector.condition, 'wait_for', side_effect=observed_wait):
+                for caller in callers:
+                    caller.start()
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(waiting.wait(2))
+                started = time.monotonic()
+                collector.close()
+                for caller in callers:
+                    caller.join(timeout=0.5)
+                    self.assertFalse(caller.is_alive())
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertEqual(len(failures), agent.MAX_CLIENTS)
+                release.set()
+                collector.worker.join(timeout=1)
+                self.assertFalse(collector.worker.is_alive())
+                self.assertIsNone(collector.snapshot)
+        finally:
+            collector.close()
+            release.set()
+            for caller in callers:
+                if caller.ident is not None:
+                    caller.join(timeout=1)
+
+
 class HTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -161,6 +299,10 @@ class HTTPTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=3)
         cls.patcher.stop()
+
+    def setUp(self):
+        self.server.collector.close()
+        self.server.collector = agent.MetricsCollector(self.server.services)
 
     def request(self, path="/metrics", token=TOKEN, method="GET"):
         connection = http.client.HTTPConnection(*self.server.server_address, timeout=3)
@@ -201,6 +343,26 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(int(headers["Content-Length"]), len(body))
         self.assertEqual(json.loads(body)["cpu_percent"], 37.5)
+
+    def test_stalled_metrics_do_not_exhaust_http_slots(self):
+        entered = threading.Event()
+        release = threading.Event()
+        def stalled(services):
+            entered.set()
+            release.wait(5)
+            return {'done': True}
+        try:
+            with patch.object(agent, 'collect_metrics', side_effect=stalled) as collect, patch.object(agent, 'COLLECTION_WAIT', 0.02):
+                for _ in range(agent.MAX_CLIENTS + 2):
+                    self.assertEqual(self.request()[0], 503)
+                self.assertTrue(entered.is_set())
+                collect.assert_called_once()
+                self.assertEqual(self.request(token='wrong')[0], 401)
+                release.set()
+                with self.server.collector.condition:
+                    self.assertTrue(self.server.collector.condition.wait_for(lambda: not self.server.collector.running, 2))
+        finally:
+            release.set()
 
     def test_only_exact_metrics_path(self):
         for path in ("/", "/metrics?x=1", "/metrics/"):
