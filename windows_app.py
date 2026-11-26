@@ -362,6 +362,7 @@ def run_tray(directory):
         window.events.closing += closing
         icon.run_detached()
         # WebView2 must run on the main thread; never fall back to legacy MSHTML.
+        webview.settings['ALLOW_DOWNLOADS'] = True
         webview.start(gui='edgechromium', debug=False, private_mode=True)
     except Exception:
         message('桌面視窗無法啟動。請確認已安裝 Microsoft Edge WebView2 Runtime，並重新啟動程式。\n'

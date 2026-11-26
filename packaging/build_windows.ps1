@@ -1,12 +1,18 @@
 param(
     [string]$Python = "python",
     [string]$Iscc = "",
-    [string]$Version = "1.0.0"
+    [string]$Version = ""
 )
 $ErrorActionPreference = "Stop"
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z" }
 $Root = Split-Path $PSScriptRoot -Parent
 Set-Location $Root
+$VersionPattern = '(<small id="app-version">[^<>]*?v)\d+\.\d+\.\d+(</small>)'
+if (-not $Version) {
+    $SourceHtml = [IO.File]::ReadAllText((Join-Path $Root 'static\index.html'))
+    if ($SourceHtml -notmatch '<small id="app-version">[^<>]*?v(\d+\.\d+\.\d+)</small>') { throw 'Missing UI version' }
+    $Version = $Matches[1]
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z" }
 function Checked([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed ($LASTEXITCODE)" }
@@ -19,6 +25,11 @@ Checked $BuildPython @("-m", "pip", "install", "-r", "requirements-windows.txt")
 Checked $BuildPython @("packaging/create_icon.py")
 Checked $BuildPython @("packaging/collect_licenses.py")
 Checked $BuildPython @("-m", "PyInstaller", "--noconfirm", "--clean", "packaging/NetwordMonitor.spec")
+$BundledHtmlPath = Join-Path $Root 'dist\NetwordMonitor\_internal\static\index.html'
+$BundledHtml = [IO.File]::ReadAllText($BundledHtmlPath)
+if ([regex]::Matches($BundledHtml, $VersionPattern).Count -ne 1) { throw 'Expected one UI version marker' }
+$BundledHtml = $BundledHtml -replace $VersionPattern, ('${1}' + $Version + '${2}')
+[IO.File]::WriteAllText($BundledHtmlPath, $BundledHtml, [Text.UTF8Encoding]::new($false))
 # Fail closed if the distributable ever gains private runtime files.
 $Forbidden = Get-ChildItem "dist\NetwordMonitor" -Recurse -File | Where-Object {
     $_.Name -in @("hosts.json", "notifications.json", "agent.env") -or

@@ -374,6 +374,7 @@
     $('extra-checks-note').hidden = !model.extraChecks.length;
     $('extra-checks-note').textContent = `另有 ${model.extraChecks.length} 個既有 HTTP 檢查，儲存時將保留。`;
     $('agent-enabled').checked = !!host?.agent_enabled;
+    $('host-mac').value = host?.mac_address ?? '';
     $('agent-port').value = host?.agent_port ?? 9105;
     $('agent-token').value = '';
     $('agent-token').disabled = false;
@@ -408,7 +409,7 @@
       const agentEnabled = $('agent-enabled').checked;
       const agentPort = Number($('agent-port').value);
       if (agentEnabled && (!Number.isInteger(agentPort) || agentPort < 1 || agentPort > 65535)) throw new Error('Agent 連接埠必須是 1–65535 的整數');
-      payload = { name, ip, checks, agent_enabled: agentEnabled, agent_port: Number.isInteger(agentPort) && agentPort > 0 && agentPort <= 65535 ? agentPort : 9105 };
+      payload = { name, ip, checks, mac_address: $('host-mac').value.trim(), agent_enabled: agentEnabled, agent_port: Number.isInteger(agentPort) && agentPort > 0 && agentPort <= 65535 ? agentPort : 9105 };
       const token = $('agent-token').value;
       // Editing with a blank password must never overwrite a stored secret.
       if ($('clear-token').checked) payload.agent_token = '';
@@ -437,6 +438,7 @@
     model.detailId = id;
     model.detailSignature = null;
     showError('detail-error', '');
+    $('wake-status').textContent = '';
     renderDetail();
     $('detail-dialog').showModal();
   }
@@ -483,6 +485,7 @@
     model.detailSignature = signature;
     $('detail-title').textContent = host.name || host.ip;
     $('detail-ip').textContent = host.ip;
+    $('wake-host').hidden = !host.mac_address || host.ip.startsWith('127.');
     const content = document.createDocumentFragment();
     const summary = el('div', 'detail-summary');
     summary.append(badge(statusOf(host)), latency(host.last?.latency_ms));
@@ -859,6 +862,22 @@
     } catch (error) { showError('settings-error', error.message); }
     finally { settingsBusy(false); }
   });
+  $('export-config').addEventListener('click', async () => {
+    const button = $('export-config');
+    button.disabled = true;
+    showError('settings-error', '');
+    try {
+      const config = await api('/api/config/export');
+      const file = new Blob([JSON.stringify(config, null, 2) + '\n'], { type: 'application/json' });
+      const url = URL.createObjectURL(file);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'netword-settings.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { showError('settings-error', error.message); }
+    finally { button.disabled = false; }
+  });
   $('settings-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     if (model.settingsBusy || !model.settingsLoaded) return;
@@ -909,6 +928,24 @@
   $('detail-dialog').addEventListener('close', () => { model.detailId = null; });
   $('add-host').addEventListener('click', () => openHost());
   $('empty-add').addEventListener('click', () => openHost());
+  $('wake-host').addEventListener('click', async () => {
+    const id = model.detailId;
+    const dialog = $('detail-dialog');
+    const status = $('wake-status');
+    const button = $('wake-host');
+    button.disabled = true;
+    status.textContent = '正在送出喚醒封包…';
+    let message;
+    try {
+      await api(`/api/hosts/${encodeURIComponent(id)}/wake`, 'POST', {});
+      message = '已送出喚醒封包，請查看後續監測狀態以確認是否開機。';
+    } catch (error) {
+      message = error.message;
+    } finally {
+      button.disabled = false;
+      if (dialog.open && model.detailId === id) status.textContent = message;
+    }
+  });
   $('host-form').addEventListener('submit', saveHost);
   $('agent-enabled').addEventListener('change', () => { $('agent-fields').disabled = !$('agent-enabled').checked; });
   $('clear-token').addEventListener('change', () => {

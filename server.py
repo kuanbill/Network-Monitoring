@@ -6,6 +6,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -96,13 +97,20 @@ def validate_host(data, previous=None):
         raise ValueError('agent_enabled 須為布林值')
     if enabled and len(token) < 24:
         raise ValueError('啟用代理程式須提供至少 24 字元的 token')
+    mac = data.get('mac_address', (previous or {}).get('mac_address', ''))
+    if not isinstance(mac, str) or (mac and not re.fullmatch(r'[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}', mac)):
+        raise ValueError('MAC 位址格式錯誤')
+    mac = mac.replace('-', ':').upper()
+    if mac and (int(mac[:2], 16) & 1 or mac == '00:00:00:00:00:00'):
+        raise ValueError('請輸入主機網卡的單播 MAC 位址')
     # Reject strings that cannot be persisted as UTF-8 (e.g. lone surrogates).
     name.encode('utf-8')
     for check in clean:
         if check['type'] == 'http':
             check['url'].encode('utf-8')
     return {'id': (previous or {}).get('id', uuid.uuid4().hex), 'name': name.strip(), 'ip': ip,
-            'checks': clean, 'agent_enabled': enabled, 'agent_port': port(data.get('agent_port', 9105)), 'agent_token': token}
+            'checks': clean, 'agent_enabled': enabled, 'agent_port': port(data.get('agent_port', 9105)), 'agent_token': token,
+            'mac_address': mac}
 
 
 def ping(ip):
@@ -253,6 +261,8 @@ class Monitor:
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.hosts = []
+        self.last_wol = float('-inf')
+
         self.states = {}
         self.scan = {'running': False, 'progress': 0, 'total': 0, 'results': [], 'error': None}
         if self.path.exists():
@@ -271,6 +281,18 @@ class Monitor:
             os.replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def export_config(self):
+        with self.lock:
+            notification_settings = self.notifications.public()
+            return {
+                'format': 'netword-monitor', 'version': 1,
+                'settings': dict(self.settings),
+                'hosts': [{k: copy.deepcopy(v) for k, v in host.items() if k != 'agent_token'}
+                          for host in self.hosts],
+                'notifications': {k: v for k, v in notification_settings.items()
+                                  if k not in ('password_set', 'delivery')},
+            }
 
     def get_settings(self):
         with self.lock:
@@ -296,6 +318,24 @@ class Monitor:
             if changed:
                 self.wake.set()
             return dict(settings)
+
+    def wake_host(self, identity):
+        with self.lock:
+            host = next((h for h in self.hosts if h['id'] == identity), None)
+            if host is None:
+                raise KeyError('找不到主機')
+            if not host['mac_address'] or host['ip'].startswith('127.'):
+                raise ValueError('只可喚醒已設定 MAC 位址的區網主機')
+            now = time.monotonic()
+            if now - self.last_wol < 3:
+                raise ValueError('請間隔至少 3 秒再送出喚醒封包')
+            self.last_wol = now
+            mac = host['mac_address']
+        packet = b'\xff' * 6 + bytes.fromhex(mac.replace(':', '')) * 16
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(TIMEOUT)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(packet, ('255.255.255.255', 9))
 
     def state(self):
         with self.lock:
@@ -465,6 +505,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized_origin():
             return
         path = urlsplit(self.path).path
+        if path == '/api/config/export':
+            return self.send_json(200, self.server.monitor.export_config())
         if path == '/api/state':
             return self.send_json(200, self.server.monitor.state())
         if path == '/api/settings':
@@ -515,6 +557,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(201, monitor.change(data))
             if path.startswith('/api/hosts/') and self.command in ('PUT', 'DELETE'):
                 return self.send_json(200, monitor.change(data, path[len('/api/hosts/'):], self.command == 'DELETE'))
+            if self.command == 'POST' and (match := re.fullmatch(r'/api/hosts/([^/]+)/wake', path)):
+                if data:
+                    raise ValueError('喚醒請求不接受額外參數')
+                try:
+                    monitor.wake_host(match[1])
+                except OSError:
+                    return self.send_json(502, {'error': '無法送出喚醒封包，請檢查管理端網路'})
+                return self.send_json(200, {'ok': True})
             if path == '/api/refresh' and self.command == 'POST':
                 monitor.wake.set()
                 return self.send_json(202, {'ok': True})

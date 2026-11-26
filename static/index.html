@@ -31,7 +31,7 @@
     <a class="brand" href="./" aria-label="LANscope 首頁"><span class="brand-mark"><svg class="icon"><use href="#i-pulse"/></svg></span><span>LAN<span class="brand-light">scope</span><small>NETWORK MONITOR</small></span></a>
     <div class="nav-label">工作空間</div>
     <nav aria-label="主要導覽"><a class="nav-item active" href="#overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>監測總覽<span class="nav-count" id="nav-count">0</span></a><button class="nav-item" id="nav-scan"><svg class="icon"><use href="#i-scan"/></svg>探索區域網路</button><button class="nav-item" id="nav-notifications" aria-label="郵件通知設定"><svg class="icon"><use href="#i-alert"/></svg>郵件通知</button></nav>
-    <div class="sidebar-bottom"><span class="local-dot"></span><div>私有網路・集中監測<small>讓每一次連線，都清楚可見。</small></div></div>
+    <div class="sidebar-bottom"><span class="local-dot"></span><div>私有網路・集中監測<small id="app-version">版本 v1.2.1</small></div></div>
   </aside>
 
   <div class="app-shell" id="overview">
@@ -69,6 +69,7 @@
         <label>HTTP 檢查網址<input id="host-url" type="url" placeholder="http://192.168.1.10/health"><span class="field-help">網址須使用此主機的 IP，不可包含帳密或片段。</span><span class="field-help" id="extra-checks-note" hidden></span></label>
         <div class="agent-toggle"><div><strong>主機 Agent</strong><p>取得 CPU、記憶體、磁碟與服務資訊</p></div><label class="switch"><input type="checkbox" id="agent-enabled"><span></span><span class="sr-only">啟用 Agent</span></label></div>
         <fieldset id="agent-fields" disabled><div class="form-row"><label>Agent 連接埠<input id="agent-port" type="number" min="1" max="65535" value="9105" required></label><label>Agent Token<input id="agent-token" type="password" autocomplete="new-password" placeholder="輸入存取權杖"><span class="field-help" id="token-help">權杖只會傳送，不會顯示。</span></label></div><label class="checkbox-label" id="clear-token-wrap" hidden><input type="checkbox" id="clear-token">清除已儲存的 Token</label></fieldset>
+        <label>網卡 MAC 位址（選填）<input id="host-mac" maxlength="17" placeholder="00:11:22:33:44:55" autocomplete="off"></label>
         <div class="error-banner" id="host-form-error" role="alert" hidden></div>
       </div>
       <div class="modal-footer"><button type="button" class="button secondary" data-close="host-dialog">取消</button><button type="submit" class="button primary" id="save-host">儲存主機</button></div>
@@ -84,6 +85,8 @@
           <label>背景監測間隔（秒）<input id="monitor-interval" type="number" min="5" max="3600" step="1" required><span class="field-help">5–3600 秒，預設 30 秒。每輪量測完成後等待此秒數；調整後會安排新一輪檢查。</span></label>
           <p class="field-help">此設定由管理端共用，會影響所有連線畫面。間隔越短，網路與主機負載越高；監測間隔也會影響異常通知的確認時間。不會變更 Agent 自身的指標收集頻率。</p>
         </fieldset>
+        <button type="button" class="button secondary" id="export-config">匯出整套設定</button>
+        <p class="field-help">JSON 檔不包含 Agent Token 或 SMTP 密碼，仍含主機與通知資訊，請妥善保存。</p>
         <div id="settings-error" class="error-banner" role="alert" hidden></div>
       </div>
       <div class="modal-footer"><button type="button" class="button secondary" data-close="settings-dialog">取消</button><button type="submit" class="button primary" id="save-settings" disabled>儲存設定</button></div>
@@ -126,7 +129,7 @@
     <div class="modal-footer"><span class="footer-hint" id="scan-selected-count">已選取 0 個裝置</span><button class="button secondary" data-close="scan-dialog">關閉</button><button class="button primary" id="add-discovered" disabled>加入監測</button></div>
   </dialog>
 
-  <dialog id="detail-dialog" class="detail-drawer" aria-labelledby="detail-title"><div class="modal-header"><div><div class="eyebrow">HOST INSIGHTS</div><h2 id="detail-title">主機詳情</h2><p id="detail-ip" class="mono"></p></div><button class="icon-button" data-close="detail-dialog" aria-label="關閉"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="error-banner" id="detail-error" role="alert" hidden></div><div class="modal-body" id="detail-content"></div><div class="modal-footer"><button class="button danger" id="delete-host"><svg class="icon"><use href="#i-trash"/></svg>移除主機</button><button class="button secondary" id="edit-host"><svg class="icon"><use href="#i-edit"/></svg>編輯設定</button></div></dialog>
+  <dialog id="detail-dialog" class="detail-drawer" aria-labelledby="detail-title"><div class="modal-header"><div><div class="eyebrow">HOST INSIGHTS</div><h2 id="detail-title">主機詳情</h2><p id="detail-ip" class="mono"></p></div><button class="icon-button" data-close="detail-dialog" aria-label="關閉"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="error-banner" id="detail-error" role="alert" hidden></div><p id="wake-status" role="status"></p><div class="modal-body" id="detail-content"></div><div class="modal-footer"><button class="button secondary" id="wake-host" hidden>遠端開機</button><button class="button danger" id="delete-host"><svg class="icon"><use href="#i-trash"/></svg>移除主機</button><button class="button secondary" id="edit-host"><svg class="icon"><use href="#i-edit"/></svg>編輯設定</button></div></dialog>
   <div class="toast-region" id="toasts" aria-live="polite" aria-atomic="false"></div>
   <noscript><div class="noscript">請啟用 JavaScript 以使用 LANscope 監測儀表板。</div></noscript>
 </body>

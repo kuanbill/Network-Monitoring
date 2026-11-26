@@ -66,6 +66,27 @@ class ValidationTests(unittest.TestCase):
 
 
 class MonitorTests(unittest.TestCase):
+    def test_wake_packet_and_cooldown(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = server.Monitor(directory)
+            host = monitor.change({'ip': '192.168.6.23', 'mac_address': '00-D8-61-B5-BF-FC'})
+            monitor = server.Monitor(directory)
+            self.assertEqual(monitor.state()['hosts'][0]['mac_address'], '00:D8:61:B5:BF:FC')
+            with patch.object(server.socket, 'socket') as socket_factory:
+                monitor.wake_host(host['id'])
+                with self.assertRaises(ValueError):
+                    monitor.wake_host(host['id'])
+                sock = socket_factory.return_value.__enter__.return_value
+                sock.sendto.assert_called_once_with(
+                    b'\xff' * 6 + bytes.fromhex('00D861B5BFFC') * 16, ('255.255.255.255', 9))
+
+    def test_invalid_wake_mac(self):
+        for mac in (None, 'bad', 'FF:FF:FF:FF:FF:FF', '00:00:00:00:00:00'):
+            with self.subTest(mac=mac), self.assertRaises(ValueError):
+                server.validate_host({'ip': '192.168.6.23', 'mac_address': mac})
+
     def test_settings_defaults_validation_and_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             monitor = server.Monitor(directory, interval=60)
@@ -304,6 +325,23 @@ class APITests(unittest.TestCase):
         body = response.read()
         connection.close()
         return response.status, json.loads(body)
+
+    def test_wake_api(self):
+        from unittest.mock import patch
+
+        status, host = self.request('POST', '/api/hosts', {
+            'ip': '192.168.6.44', 'mac_address': '00-D8-61-B5-BC-83'})
+        self.assertEqual(status, 201)
+        path = f"/api/hosts/{host['id']}/wake"
+        with patch.object(self.server.monitor, 'wake_host') as wake:
+            self.assertEqual(self.request('POST', path, {}, {'Origin': 'http://example.com'})[0], 403)
+            self.assertEqual(self.request('POST', path, {'ip': '192.168.6.23'})[0], 400)
+            wake.assert_not_called()
+            self.assertEqual(self.request('POST', path, {}), (200, {'ok': True}))
+            wake.assert_called_once_with(host['id'])
+            wake.side_effect = OSError()
+            self.assertEqual(self.request('POST', path, {})[0], 502)
+        self.assertEqual(self.request('POST', '/api/hosts/missing/wake', {})[0], 404)
 
     def test_api_crud(self):
         status, host = self.request('POST', '/api/hosts', {'ip': '127.0.0.1'})
