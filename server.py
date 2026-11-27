@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 import socket
 import subprocess
@@ -16,7 +17,8 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
-from notifications import DOCKER_UNIT, NotificationManager
+from config_import import prepare_import
+from notifications import DOCKER_UNIT, NotificationManager, validate_settings as validate_notifications
 from website_probe import WEBSITE_DOMAINS, probe_website
 
 ROOT = Path(__file__).resolve().parent
@@ -24,6 +26,7 @@ PRIVATE = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192
 TIMEOUT = 1.5
 MAX_CLIENTS = 32
 REQUEST_DEADLINE = 10
+PREVIEW_TTL = 600
 DOCKER_DETAILS = {
     'active': 'systemd 回報 Docker 服務運行中',
     'inactive': 'Docker 服務未運行',
@@ -296,39 +299,125 @@ def validate_settings(data, previous=None):
     return result
 
 
+def write_private_json(path, data, prefix):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=prefix, suffix='.tmp', dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class ImportConflict(ValueError):
+    pass
+
+
 class Monitor:
     def __init__(self, data_dir, interval=30):
         self.path = Path(data_dir) / 'hosts.json'
         self.settings_path = Path(data_dir) / 'settings.json'
+        self.configuration_path = Path(data_dir) / 'configuration.json'
+        self.combined_configuration = self.configuration_path.exists()
         defaults = validate_settings({'monitor_interval': interval})
-        self.settings = validate_settings(json.loads(self.settings_path.read_text(encoding='utf-8')), defaults) if self.settings_path.exists() else defaults
-        self.notifications = NotificationManager(data_dir)
+        self.hosts = []
+        private_notice = None
+        if self.combined_configuration:
+            try:
+                data = json.loads(self.configuration_path.read_text(encoding='utf-8'))
+                if (not isinstance(data, dict) or set(data) != {'version', 'hosts', 'settings', 'notifications'}
+                        or type(data['version']) is not int or data['version'] != 1):
+                    raise ValueError()
+                self.settings = validate_settings(data['settings'])
+                if (not isinstance(data['hosts'], list) or len(data['hosts']) > 256 or
+                        not isinstance(data['notifications'], dict)):
+                    raise ValueError()
+                if any(not isinstance(h, dict) or not isinstance(h.get('id'), str) or not h['id'] for h in data['hosts']):
+                    raise ValueError()
+                self.hosts = [validate_host(h, h) for h in data['hosts']]
+                if any(len({host[k] for host in self.hosts}) != len(self.hosts) for k in ('id', 'ip')):
+                    raise ValueError()
+                private_notice = validate_notifications(data['notifications'])
+            except (ValueError, TypeError, RecursionError):
+                raise ValueError('configuration.json 格式錯誤，未載入舊設定') from None
+        else:
+            self.settings = validate_settings(json.loads(self.settings_path.read_text(encoding='utf-8')), defaults) if self.settings_path.exists() else defaults
+            if self.path.exists():
+                self.hosts = [validate_host(h, h) for h in json.loads(self.path.read_text(encoding='utf-8'))]
+        self.notifications = NotificationManager(data_dir, settings=private_notice)
         self.lock = threading.RLock()
         self.cycle_lock = threading.Lock()
         self.interval = self.settings['monitor_interval']
         self.stop = threading.Event()
         self.wake = threading.Event()
-        self.hosts = []
         self.last_wol = float('-inf')
+        self.config_revision = 0
+        self.pending_import = None
 
         self.states = {}
         self.scan = {'running': False, 'progress': 0, 'total': 0, 'results': [], 'error': None}
-        if self.path.exists():
-            self.hosts = [validate_host(h, h) for h in json.loads(self.path.read_text(encoding='utf-8'))]
 
     def save(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # mkstemp creates a unique file with mode 0600 before any secrets are written.
-        descriptor, name = tempfile.mkstemp(prefix='hosts-', suffix='.tmp', dir=self.path.parent)
-        temporary = Path(name)
-        try:
-            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
-                json.dump(self.hosts, stream, ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        if self.combined_configuration:
+            with self.notifications.lock:
+                self._write_configuration(self.hosts, self.settings, self.notifications.settings)
+        else:
+            write_private_json(self.path, self.hosts, 'hosts-')
+
+    def _write_configuration(self, hosts, settings, notifications):
+        write_private_json(self.configuration_path, {'version': 1, 'hosts': hosts, 'settings': settings,
+                                                      'notifications': notifications}, 'configuration-')
+
+    def _configuration_changed(self):
+        self.config_revision += 1
+        self.pending_import = None
+
+    def preview_import(self, document: dict) -> dict:
+        with self.lock, self.notifications.lock:
+            current = {'hosts': self.hosts, 'settings': self.settings, 'notifications': self.notifications.settings}
+            candidate, summary = prepare_import(document, current, normalize_ip=valid_ip, validate_host=validate_host,
+                                                validate_frequency=validate_settings)
+            token = secrets.token_urlsafe(24)
+            self.pending_import = (token, time.monotonic() + PREVIEW_TTL, self.config_revision, candidate)
+            return {**copy.deepcopy(summary), 'confirmation_token': token}
+
+    def apply_import(self, confirmation_token: str) -> dict:
+        with self.lock, self.notifications.lock:
+            pending = self.pending_import
+            if pending and time.monotonic() >= pending[1]:
+                self.pending_import = pending = None
+            if (not pending or pending[2] != self.config_revision or not isinstance(confirmation_token, str)
+                    or not confirmation_token.isascii() or not secrets.compare_digest(confirmation_token, pending[0])):
+                raise ImportConflict('匯入預覽已失效，請重新選擇檔案並預覽')
+            candidate = pending[3]
+            self._write_configuration(candidate['hosts'], candidate['settings'], candidate['notifications'])
+            self.combined_configuration = True
+            self.hosts = candidate['hosts']
+            self.settings = candidate['settings']
+            self.interval = self.settings['monitor_interval']
+            self.states.clear()
+            self.notifications.commit_settings(candidate['notifications'])
+            self._configuration_changed()
+            self.wake.set()
+            return {'ok': True, 'settings': dict(self.settings)}
+
+    def update_notifications(self, data: dict) -> dict:
+        with self.lock, self.notifications.lock:
+            previous = self.notifications.settings
+            if self.combined_configuration:
+                settings = validate_notifications(data, previous)
+                if settings != previous:
+                    self._write_configuration(self.hosts, self.settings, settings)
+                    self.notifications.commit_settings(settings)
+            else:
+                self.notifications.update(data)
+            if self.notifications.settings != previous:
+                self._configuration_changed()
+            return self.notifications.public()
 
     def export_config(self):
         with self.lock:
@@ -349,18 +438,14 @@ class Monitor:
     def update_settings(self, data):
         with self.lock:
             settings = validate_settings(data, self.settings)
-            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor, name = tempfile.mkstemp(prefix='settings-', suffix='.tmp', dir=self.settings_path.parent)
-            temporary = Path(name)
-            try:
-                with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
-                    json.dump(settings, stream, ensure_ascii=False, indent=2)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.settings_path)
-            finally:
-                temporary.unlink(missing_ok=True)
+            if self.combined_configuration:
+                with self.notifications.lock:
+                    self._write_configuration(self.hosts, settings, self.notifications.settings)
+            else:
+                write_private_json(self.settings_path, settings, 'settings-')
             changed = self.interval != settings['monitor_interval']
+            if settings != self.settings:
+                self._configuration_changed()
             self.settings = settings
             self.interval = settings['monitor_interval']
             if changed:
@@ -423,6 +508,8 @@ class Monitor:
             except (OSError, ValueError):
                 self.hosts, self.states = old_hosts, old_states
                 raise
+            if delete or previous != host:
+                self._configuration_changed()
             if delete or (previous and previous['ip'] != host['ip']):
                 self.notifications.forget(identity)
             elif previous:

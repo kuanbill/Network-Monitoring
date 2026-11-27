@@ -173,11 +173,13 @@ def failure_explanation(detail, agent=False):
 
 
 class NotificationManager:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, *, settings=None):
         self.path = Path(data_dir) / 'notifications.json'
         self.lock = threading.RLock()
         self.settings = copy.deepcopy(DEFAULTS)
-        if self.path.exists():
+        if settings is not None:
+            self.settings = validate_settings(settings)
+        elif self.path.exists():
             self.settings = validate_settings(json.loads(self.path.read_text(encoding='utf-8')))
         self.generation = 0
         self.records = {}
@@ -211,13 +213,17 @@ class NotificationManager:
                 os.replace(temporary, self.path)
             finally:
                 temporary.unlink(missing_ok=True)
-            # Commit only after persistence succeeded. Old queued jobs become invalid.
+            self.commit_settings(settings)
+            return self.public()
+
+    def commit_settings(self, settings):
+        """Publish already validated, persisted settings and invalidate old jobs."""
+        with self.lock:
             self.settings = settings
             self.generation += 1
             self.records.clear()
             self.host_versions.clear()
             self.delivery = {'status': 'idle', 'timestamp': None, 'error': ''}
-            return self.public()
 
     def _status(self, status, error=''):
         self.delivery = {'status': status, 'timestamp': time.time(), 'error': error}
