@@ -17,7 +17,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
-from config_import import prepare_import
+from config_import import IMPORT_FILE_LIMIT, parse_export, prepare_import
 from notifications import DOCKER_UNIT, NotificationManager, validate_settings as validate_notifications
 from website_probe import WEBSITE_DOMAINS, probe_website
 
@@ -685,6 +685,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized_origin():
             return
         try:
+            path = urlsplit(self.path).path
+            if path in ('/api/config/import/preview', '/api/config/import/apply'):
+                return self.import_config(path.endswith('/preview'))
             if self.headers.get('Content-Type', '').split(';')[0] != 'application/json' and self.command != 'DELETE':
                 raise ValueError('Content-Type 須為 application/json')
             length = int(self.headers.get('Content-Length', '0'))
@@ -693,12 +696,11 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length)) if length else {}
             if not isinstance(data, dict):
                 raise ValueError('請求須為 JSON 物件')
-            path = urlsplit(self.path).path
             monitor = self.server.monitor
             if path == '/api/settings' and self.command == 'PUT':
                 return self.send_json(200, monitor.update_settings(data))
             if path == '/api/notifications' and self.command == 'PUT':
-                return self.send_json(200, monitor.notifications.update(data))
+                return self.send_json(200, monitor.update_notifications(data))
             if path == '/api/notifications/test' and self.command == 'POST':
                 return self.send_json(202, monitor.notifications.test())
             if path == '/api/hosts' and self.command == 'POST':
@@ -726,6 +728,48 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.send_json(500, {'error': '無法儲存設定，請檢查資料目錄權限'})
 
+    def import_config(self, preview):
+        if self.command != 'POST':
+            return self.send_json(404, {'error': '找不到 API'})
+        if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+            return self.send_json(400, {'error': 'Content-Type 須為 application/json'})
+        lengths = self.headers.get_all('Content-Length', [])
+        if len(lengths) != 1 or self.headers.get('Transfer-Encoding') or not re.fullmatch(r'[0-9]{1,10}', lengths[0]):
+            return self.send_json(400, {'error': '匯入請求長度格式不正確'})
+        length = int(lengths[0])
+        if length > (IMPORT_FILE_LIMIT if preview else 32768):
+            return self.send_json(413 if preview else 400, {'error': '匯入請求內容過大'})
+        if preview and not self.server.import_slot.acquire(blocking=False):
+            return self.send_json(429, {'error': '已有匯入預覽進行中，請稍後再試'})
+        status = 200
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                status, result = 400, {'error': '匯入請求未完整接收'}
+            elif preview:
+                result = self.server.monitor.preview_import(parse_export(raw))
+            else:
+                data = json.loads(raw.decode('utf-8'), object_pairs_hook=list)
+                if (not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], tuple)
+                        or data[0][0] != 'confirmation_token' or not isinstance(data[0][1], str)
+                        or not re.fullmatch(r'[A-Za-z0-9_-]{32}', data[0][1])):
+                    raise ValueError()
+                result = self.server.monitor.apply_import(data[0][1])
+        except ImportConflict:
+            status, result = 409, {'error': '匯入預覽已失效，請重新選擇檔案並預覽'}
+        except (ConnectionError, TimeoutError):
+            return
+        except (ValueError, TypeError, RecursionError) as exc:
+            # Preview validation produces only controlled section/index messages.
+            status, result = 400, {'error': str(exc) if preview and type(exc) is ValueError
+                                   else '匯入確認格式無效，請重新預覽'}
+        except OSError:
+            status, result = 500, {'error': '無法儲存設定，請檢查資料目錄權限'}
+        finally:
+            if preview:
+                self.server.import_slot.release()
+        self.send_json(status, result)
+
     do_POST = mutate
     do_PUT = mutate
     do_DELETE = mutate
@@ -738,6 +782,7 @@ class Server(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        self.import_slot = threading.Lock()
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):

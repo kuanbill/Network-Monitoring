@@ -136,6 +136,36 @@ class DesktopTests(unittest.TestCase):
                 ready.close()
             self.assertFalse(backend.is_alive())
 
+    def test_desktop_import_is_scoped_to_live_session(self):
+        controller = app.BackendController(self.directory, self.free_port())
+        try:
+            controller.start()
+            base = controller.url
+            with urllib.request.urlopen(base + '/api/config/export', timeout=3) as reply:
+                raw = reply.read()
+            def post(url, body):
+                request = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+                try:
+                    with urllib.request.urlopen(request, timeout=3) as reply:
+                        return reply.status, json.load(reply)
+                except HTTPError as reply:
+                    with reply:
+                        return reply.code, json.load(reply)
+            path = '/api/config/import/preview'
+            apply = '/api/config/import/apply'
+            unscoped = base.split('/__desktop__', 1)[0]
+            self.assertEqual(post(unscoped + path, raw)[0], 404)
+            status, result = post(base + path, raw)
+            self.assertEqual(status, 200)
+            confirmation = json.dumps({'confirmation_token': result['confirmation_token']}).encode()
+            self.assertEqual(post(unscoped + apply, confirmation)[0], 404)
+            self.assertEqual(post(unscoped + '/__desktop__/stale-session' + apply, confirmation)[0], 404)
+            self.assertFalse((self.directory / 'data' / 'configuration.json').exists())
+            self.assertEqual(post(base + apply, confirmation)[0], 200)
+            self.assertTrue((self.directory / 'data' / 'configuration.json').exists())
+        finally:
+            controller.stop()
+
     @unittest.skipUnless(importlib.util.find_spec('webview'), 'Install requirements-windows.txt for desktop test')
     def test_desktop_close_hides_and_tray_reopens_then_quits(self):
         import pystray
