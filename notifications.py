@@ -13,6 +13,7 @@ import ssl
 import tempfile
 import threading
 import time
+from website_probe import WEBSITE_DOMAINS
 
 DEFAULTS = {
     'enabled': False, 'smtp_host': 'smtp.gmail.com', 'smtp_port': 587,
@@ -24,6 +25,8 @@ QUEUE_SIZE = 256
 DELIVERY_DEADLINE = 20
 RETRY_DELAY = 60
 MAX_ATTEMPTS = 3
+INCIDENT_TYPES = ('host', 'docker', 'website')
+DOCKER_UNIT = 'docker.service'
 
 
 class DeliveryUncertain(Exception):
@@ -250,52 +253,70 @@ class NotificationManager:
             self._status('queued')
             return {'ok': True, 'message': '測試信已排程；請查看寄送狀態與信箱'}
 
-    def forget(self, identity):
+    def forget(self, identity, kinds: set[str] | None = None):
         with self.lock:
-            self.records.pop(identity, None)
-            self.host_versions.pop(identity, None)
+            for kind in INCIDENT_TYPES if kinds is None else kinds:
+                self.records.pop((identity, kind), None)
+                self.host_versions.pop((identity, kind), None)
 
     def observe(self, host, last):
         """One call per completed measurement, never per dashboard refresh."""
         with self.lock:
             if self.stop.is_set() or not self.settings['enabled']:
                 return
-            status = last.get('status')
-            if status not in ('up', 'down', 'degraded'):
-                return
-            identity = host['id']
-            record = self.records.setdefault(identity, self._new_record(identity))
-            record['host'] = {'name': host['name'], 'ip': host['ip']}
-            record['last'] = copy.deepcopy(last)
-            if status != 'up':
-                record['bad'] += 1
-                record['good'] = 0
-                if not record['active'] and record['bad'] >= self.settings['failure_threshold']:
-                    # Preserve a confirmed recovery even if the bounded queue was
-                    # full. Defer the new incident until its predecessor is queued.
-                    if (self.settings['notify_recovery'] and 'recovery_measurement' in record and
-                            (record['alert_sent'] or record['alert_pending']) and
-                            not record['recovery_sent'] and not record['recovery_pending'] and
-                            record['recovery_attempts'] < MAX_ATTEMPTS):
-                        if not self._enqueue('recovery', record, record['recovery_measurement']):
-                            return
-                    # A new incident follows a confirmed recovery, not degraded <-> down.
-                    renewed = self._new_record(identity)
-                    renewed.update(active=True, bad=record['bad'], host=record['host'], last=record['last'],
-                                   alert_measurement=copy.deepcopy(last))
-                    self.records[identity] = record = renewed
-            else:
-                record['bad'] = 0
-                record['good'] += 1
-                if record['active'] and record['good'] >= self.settings['recovery_threshold']:
-                    record['active'] = False
-                    record['recovery_measurement'] = copy.deepcopy(last)
-            kind = 'alert' if record['active'] else 'recovery'
-            eligible = record['active'] or ((record['alert_sent'] or record['alert_pending']) and
-                                            self.settings['notify_recovery'] and 'recovery_measurement' in record)
-            if (eligible and not record[kind + '_sent'] and not record[kind + '_pending'] and
-                    record[kind + '_attempts'] < MAX_ATTEMPTS and time.monotonic() >= record['retry_after']):
-                self._enqueue(kind, record, record.get(kind + '_measurement'))
+            public_host = {'name': host['name'], 'ip': host['ip']}
+            status = last.get('host_status', last.get('status'))
+            if status in ('up', 'down', 'degraded'):
+                agent = last.get('agent')
+                if host.get('docker_monitor_enabled') and agent and agent.get('ok'):
+                    metrics = agent.get('metrics', {})
+                    services = [s for s in metrics.get('services', []) if s.get('name') != DOCKER_UNIT]
+                    agent = {**agent, 'metrics': {'services': services}}
+                host_sample = {'status': status, 'timestamp': last['timestamp'],
+                               'checks': last.get('checks', []), 'agent': agent}
+                self._observe((host['id'], 'host'), public_host, host_sample, status == 'up')
+            for kind in ('docker', 'website'):
+                if host.get(f'{kind}_monitor_enabled'):
+                    check = last.get(kind) or {}
+                    self._observe((host['id'], kind), public_host,
+                                  {'timestamp': last['timestamp'], 'check': check}, check.get('ok'))
+
+    def _observe(self, identity, host, last, ok):
+        if ok is not True and ok is not False:
+            record = self.records.get(identity)
+            if record is not None:
+                record['bad'] = record['good'] = 0
+            return
+        record = self.records.setdefault(identity, self._new_record(identity))
+        record['host'] = host
+        record['last'] = copy.deepcopy(last)
+        if not ok:
+            record['bad'] += 1
+            record['good'] = 0
+            if not record['active'] and record['bad'] >= self.settings['failure_threshold']:
+                # Preserve a confirmed recovery even if the bounded queue was full.
+                if (self.settings['notify_recovery'] and 'recovery_measurement' in record and
+                        (record['alert_sent'] or record['alert_pending']) and
+                        not record['recovery_sent'] and not record['recovery_pending'] and
+                        record['recovery_attempts'] < MAX_ATTEMPTS):
+                    if not self._enqueue('recovery', record, record['recovery_measurement']):
+                        return
+                renewed = self._new_record(identity)
+                renewed.update(active=True, bad=record['bad'], host=record['host'], last=record['last'],
+                               alert_measurement=copy.deepcopy(last))
+                self.records[identity] = record = renewed
+        else:
+            record['bad'] = 0
+            record['good'] += 1
+            if record['active'] and record['good'] >= self.settings['recovery_threshold']:
+                record['active'] = False
+                record['recovery_measurement'] = copy.deepcopy(last)
+        kind = 'alert' if record['active'] else 'recovery'
+        eligible = record['active'] or ((record['alert_sent'] or record['alert_pending']) and
+                                        self.settings['notify_recovery'] and 'recovery_measurement' in record)
+        if (eligible and not record[kind + '_sent'] and not record[kind + '_pending'] and
+                record[kind + '_attempts'] < MAX_ATTEMPTS and time.monotonic() >= record['retry_after']):
+            self._enqueue(kind, record, record.get(kind + '_measurement'))
 
     @staticmethod
     def _new_record(identity):
@@ -322,6 +343,9 @@ class NotificationManager:
         # Host names are untrusted; never copy CR/LF into a mail header.
         name = ''.join(c if c.isprintable() else ' ' for c in host['name'])[:100]
         checked = time.strftime('%Y年%m月%d日 %H:%M:%S %z', time.localtime(last['timestamp']))
+        category = job['record']['id'][1]
+        if category != 'host':
+            return self._independent_content(job, category, name, checked)
         lines = [f"主機：{name}", f"IP：{host['ip']}", f"狀態：{names[last['status']]}",
                  f"檢查時間：{checked}（管理端時區）"]
         if job['kind'] == 'alert':
@@ -332,12 +356,12 @@ class NotificationManager:
                 details.append('尚未取得主機可達證據；可能是主機離線、網路中斷或防火牆阻擋，不能據此確認主機已關機。請先檢查主機電源、網路及防火牆。')
             for check in last.get('checks', []):
                 if not check.get('ok'):
-                    label = '網頁回應檢查' if check.get('type') == 'http' else '服務連接埠檢查'
+                    check_label = '網頁回應檢查' if check.get('type') == 'http' else '服務連接埠檢查'
                     # Only a validated TCP port is safe to repeat; never include URLs.
                     port = re.fullmatch(r'TCP ([0-9]{1,5})', str(check.get('label', '')))
                     if check.get('type') == 'tcp' and port and 1 <= int(port[1]) <= 65535:
-                        label += f'（TCP {int(port[1])}）'
-                    details.append(label + '失敗：' + failure_explanation(check.get('detail', '')))
+                        check_label += f'（TCP {int(port[1])}）'
+                    details.append(check_label + '失敗：' + failure_explanation(check.get('detail', '')))
             agent = last.get('agent')
             if agent and not agent.get('ok'):
                 details.append('主機代理程式（Agent）異常：' + failure_explanation(agent.get('error', ''), agent=True))
@@ -369,6 +393,47 @@ class NotificationManager:
         lines.extend(['', '同一異常事件不重複通知；確認恢復後才會建立下一次事件。',
                       '請開啟管理介面查看最新狀態。'])
         return f'[LANscope] {label}：{name} ({host["ip"]})', '\n'.join(lines)
+
+    def _independent_content(self, job, category, name, checked):
+        host, check = job['host'], job['last']['check']
+        recovery = job['kind'] == 'recovery'
+        title = 'Docker 服務' if category == 'docker' else '網站'
+        state = '恢復' if recovery else '異常'
+        threshold = job['settings']['recovery_threshold'] if recovery else 'failure_threshold'
+        lines = [f"主機：{name}", f"IP：{host['ip']}", f'檢查時間：{checked}（管理端時區）',
+                 f'已連續 {threshold} 輪檢查{"正常" if recovery else "異常"}。', '']
+        if category == 'docker':
+            lines.append(f'檢查項目：{title}（{DOCKER_UNIT}）')
+            states = {
+                'inactive': 'Docker 服務未運行；請確認這是否是預期操作。',
+                'failed': 'Docker 服務回報失敗；請查看系統服務日誌。',
+                'activating': 'Docker 服務正在啟動，尚未確認正常。',
+                'deactivating': 'Docker 服務正在停止；請確認這是否是預期操作。',
+                'reloading': 'Docker 服務正在重新載入。',
+                'maintenance': 'Docker 服務處於維護狀態。',
+            }
+            lines.append('systemd 回報 Docker 服務運行中。' if recovery else states.get(
+                check.get('code'), '無法確認 Docker 服務狀態；請確認 Agent 已設定檢查 docker.service。'))
+            lines.append('此結果不代表容器或網站正常，請分別確認。')
+        else:
+            lines.append(f"檢查項目：網站 {WEBSITE_DOMAINS.get(host['ip'], '')}")
+            status = check.get('http_status')
+            errors = {
+                'dns': 'DNS 查詢失敗或未取得公開位址；請檢查管理端的 DNS 及網站網域設定。',
+                'certificate': 'HTTPS 憑證驗證失敗；請檢查有效期、網域及憑證鏈。',
+                'connection': '無法取得 HTTPS 回應；請檢查管理端網路、反向代理及網站服務。',
+                'timeout': '網站檢查逾時；請檢查 DNS、網路與網站回應時間。',
+            }
+            if check.get('code') == 'http' and type(status) is int and 100 <= status <= 599:
+                lines.append(f'HTTPS 回應：HTTP {status}。')
+                if not recovery:
+                    lines.append('預期回傳 HTTP 2xx；請確認網站入口、重新導向設定與應用程式日誌。')
+            elif not recovery:
+                lines.append(errors.get(check.get('code'), '請至管理介面查看網站檢查結果。'))
+            lines.append('此結果僅反映管理端所見的網站入口，不代表 Docker 狀態。')
+        if recovery and job['record'].get('alert_uncertain'):
+            lines.append('注意：先前異常通知的 SMTP 接受結果未能確認。')
+        return f'[LANscope] {title}{state}：{name} ({host["ip"]})', '\n'.join(lines)
 
     def _run(self):
         while not self.stop.is_set():

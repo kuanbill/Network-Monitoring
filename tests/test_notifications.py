@@ -103,6 +103,83 @@ class IncidentTests(unittest.TestCase):
             finally:
                 self.manager.jobs.task_done()
 
+    def independent_sample(self, docker, website, host_status='up', docker_code=None):
+        self.host.update(ip='192.168.6.23', docker_monitor_enabled=True, website_monitor_enabled=True)
+        self.manager.observe(self.host, {
+            'status': 'degraded', 'host_status': host_status, 'timestamp': time.time(),
+            'docker': {'ok': docker, 'code': docker_code or ('active' if docker else 'inactive')},
+            'website': {'ok': website, 'code': 'http', 'http_status': 204 if website else 503,
+                        'label': 'https://example.invalid/?secret=never-in-mail'},
+            'agent': ({'ok': False, 'error': 'offline'} if docker is None else {'ok': True, 'metrics': {
+                'services': [{'name': 'docker.service', 'status': 'active' if docker else 'inactive'}]}}),
+        })
+
+    def test_docker_and_website_recover_independently(self):
+        for docker, website in ((False, True), (False, False), (False, True), (True, True)):
+            for _ in range(2):
+                self.independent_sample(docker, website)
+            self.drain()
+        expected = ['Docker 服務異常', '網站異常', '網站恢復', 'Docker 服務恢復']
+        self.assertEqual(self.send.call_count, 4)
+        for call, subject in zip(self.send.call_args_list, expected):
+            self.assertIn(subject, call.args[1])
+        self.assertIn('urc.landagent.com.tw', self.send.call_args_list[1].args[2])
+        self.assertNotIn('never-in-mail', self.send.call_args_list[1].args[2])
+        for _ in range(2):
+            self.independent_sample(False, True)
+        self.drain()
+        self.assertEqual(self.send.call_count, 5)
+        self.assertIn('Docker 服務異常', self.send.call_args.args[1])
+        self.manager.update({'notify_recovery': False})
+        for docker, website in [(False, False)] * 2 + [(True, True)] * 2:
+            self.independent_sample(docker, website)
+            self.drain()
+        self.assertEqual(self.send.call_count, 7)
+        self.manager.update({'enabled': False})
+        for _ in range(2):
+            self.independent_sample(False, False)
+        self.drain()
+        self.assertEqual(self.send.call_count, 7)
+
+    def test_no_data_breaks_threshold_without_false_docker_recovery(self):
+        for docker in (False, None, False):
+            self.independent_sample(docker, True, docker_code='unknown')
+        self.drain()
+        self.send.assert_not_called()
+        self.independent_sample(False, True, docker_code='unknown')
+        self.drain()
+        self.assertIn('Docker 服務異常', self.send.call_args.args[1])
+        self.assertIn('無法確認', self.send.call_args.args[2])
+        self.assertNotIn('已停止', self.send.call_args.args[2])
+        for docker in (True, None, True):
+            self.independent_sample(docker, True)
+        self.drain()
+        self.assertEqual(self.send.call_count, 1)
+        self.independent_sample(True, True)
+        self.drain()
+        self.assertIn('Docker 服務恢復', self.send.call_args.args[1])
+        for _ in range(2):
+            self.independent_sample(None, False, host_status='down')
+        self.drain()
+        self.assertEqual(self.send.call_count, 4)
+        self.assertIn('主機異常', self.send.call_args_list[2].args[1])
+        self.assertIn('Agent', self.send.call_args_list[2].args[2])
+        self.assertNotIn('docker.service', self.send.call_args_list[2].args[2])
+        self.assertIn('網站異常', self.send.call_args_list[3].args[1])
+
+    def test_forgetting_during_send_prevents_retries(self):
+        def abort_old_attempt(*args):
+            self.manager.forget('one', {'website'})
+            raise OSError('old connection failed')
+
+        self.send.side_effect = abort_old_attempt
+        for _ in range(2):
+            self.independent_sample(True, False)
+        with patch.object(self.manager.stop, 'wait', return_value=False):
+            self.drain()
+        self.assertEqual(self.send.call_count, 1)
+        self.assertIn('網站異常', self.send.call_args.args[1])
+
     def test_threshold_suppression_recovery_and_second_incident(self):
         self.observe('up', 'down')
         self.assertEqual(self.manager.jobs.qsize(), 0)
@@ -182,7 +259,7 @@ class IncidentTests(unittest.TestCase):
         self.drain()
         self.observe('unknown', 'unknown')
         self.drain()
-        self.assertTrue(self.manager.records['one']['active'])
+        self.assertTrue(self.manager.records['one', 'host']['active'])
         self.assertEqual(self.send.call_count, 1)
 
     def test_recovery_during_delivery_is_ordered_after_alert(self):
@@ -232,7 +309,7 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(wait.call_count, mail.MAX_ATTEMPTS - 1)
         self.assertTrue(all(call.args == (mail.RETRY_DELAY,) for call in wait.call_args_list))
         for _ in range(5):
-            self.manager.records['one']['retry_after'] = 0
+            self.manager.records['one', 'host']['retry_after'] = 0
             self.observe('down')
             self.drain()
         self.assertEqual(self.send.call_count, mail.MAX_ATTEMPTS)
@@ -244,7 +321,7 @@ class IncidentTests(unittest.TestCase):
         self.send.return_value = False
         self.observe('down', 'down')
         self.drain()
-        self.manager.records['one']['retry_after'] = 0
+        self.manager.records['one', 'host']['retry_after'] = 0
         self.observe('down')
         self.drain()
         self.assertEqual(self.send.call_count, 1)
@@ -256,7 +333,7 @@ class IncidentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manager.test()
         self.observe('down', 'down')
-        self.assertFalse(self.manager.records['one']['alert_pending'])
+        self.assertFalse(self.manager.records['one', 'host']['alert_pending'])
         self.assertEqual(self.manager.jobs.qsize(), 1)
         self.drain()
         self.observe('down')
@@ -270,7 +347,7 @@ class IncidentTests(unittest.TestCase):
         self.manager.jobs = queue.Queue(maxsize=1)
         self.manager.test()  # Occupy the queue while recovery is confirmed.
         self.observe('up', 'up', 'down', 'down')
-        self.assertIn('recovery_measurement', self.manager.records['one'])
+        self.assertIn('recovery_measurement', self.manager.records['one', 'host'])
         self.drain()  # Only the test mail can be delivered yet.
         self.observe('down')  # Recovery gets the slot; the new alert is deferred.
         self.drain()
@@ -390,6 +467,51 @@ class TransportTests(unittest.TestCase):
 
 
 class MonitorHookTests(unittest.TestCase):
+    def test_reconfigure_only_invalidates_affected_events(self):
+        cases = (
+            ({'docker_monitor_enabled': False}, {'網站異常'}),
+            ({'website_monitor_enabled': False}, {'Docker 服務異常', '主機異常'}),
+            ({'agent_port': 9106}, {'網站異常'}),
+            ({'checks': [{'type': 'tcp', 'port': 22}]}, {'Docker 服務異常', '網站異常'}),
+            ({'ip': '192.168.6.44'}, set()),
+            (None, set()),
+            ({'name': '新名稱'}, {'Docker 服務異常', '主機異常', '網站異常'}),
+            ('save_error', {'Docker 服務異常', '主機異常', '網站異常'}),
+        )
+        for changes, expected in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(mail, 'send_email', return_value=True) as send:
+                monitor = server.Monitor(directory)
+                manager = monitor.notifications
+                manager.update(config())
+                manager.worker = Mock()
+                config_data = {'ip': '192.168.6.23', 'agent_enabled': True, 'agent_token': 'x' * 24,
+                               'docker_monitor_enabled': True, 'website_monitor_enabled': True}
+                host = monitor.change(config_data)
+                last = {'status': 'degraded', 'host_status': 'degraded', 'timestamp': time.time(),
+                        'agent': {'ok': True, 'metrics': {'services': [
+                            {'name': 'docker.service', 'status': 'failed'}, {'name': 'ssh', 'status': 'failed'}]}},
+                        'docker': {'ok': False, 'code': 'failed'},
+                        'website': {'ok': False, 'code': 'connection'}}
+                for _ in range(2):
+                    manager.observe(host, last)
+                if changes == 'save_error':
+                    with patch.object(monitor, 'save', side_effect=OSError), self.assertRaises(OSError):
+                        monitor.change(dict(config_data, docker_monitor_enabled=False), host['id'])
+                elif changes is None:
+                    monitor.change({}, host['id'], delete=True)
+                else:
+                    monitor.change(dict(config_data, **changes), host['id'])
+                while not manager.jobs.empty():
+                    manager._process(manager.jobs.get_nowait())
+                    manager.jobs.task_done()
+                self.assertEqual({call.args[1].split('] ')[1].split('：')[0] for call in send.call_args_list}, expected)
+                for call in send.call_args_list:
+                    if '主機異常' in call.args[1]:
+                        self.assertIn('ssh', call.args[2])
+                        self.assertNotIn('docker.service', call.args[2])
+                manager.close()
+
     def test_only_committed_measurements_notify_and_cosmetic_edits_preserve(self):
         with tempfile.TemporaryDirectory() as directory:
             monitor = server.Monitor(directory)

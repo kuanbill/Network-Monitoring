@@ -16,7 +16,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
-from notifications import NotificationManager
+from notifications import DOCKER_UNIT, NotificationManager
 from website_probe import WEBSITE_DOMAINS, probe_website
 
 ROOT = Path(__file__).resolve().parent
@@ -24,7 +24,6 @@ PRIVATE = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192
 TIMEOUT = 1.5
 MAX_CLIENTS = 32
 REQUEST_DEADLINE = 10
-DOCKER_UNIT = 'docker.service'
 DOCKER_DETAILS = {
     'active': 'systemd 回報 Docker 服務運行中',
     'inactive': 'Docker 服務未運行',
@@ -424,9 +423,19 @@ class Monitor:
             except (OSError, ValueError):
                 self.hosts, self.states = old_hosts, old_states
                 raise
-            if delete or (previous and any(previous[key] != host[key] for key in
-                                           ('ip', 'checks', 'agent_enabled', 'agent_port', 'agent_token'))):
+            if delete or (previous and previous['ip'] != host['ip']):
                 self.notifications.forget(identity)
+            elif previous:
+                affected = set()
+                if previous['checks'] != host['checks']:
+                    affected.add('host')
+                if any(previous[key] != host[key] for key in
+                       ('agent_enabled', 'agent_port', 'agent_token', 'docker_monitor_enabled')):
+                    affected.update(('host', 'docker'))
+                if previous['website_monitor_enabled'] != host['website_monitor_enabled']:
+                    affected.add('website')
+                if affected:
+                    self.notifications.forget(identity, affected)
         self.wake.set()
         return result
 
