@@ -1,6 +1,7 @@
 """Bounded HTTPS checks for the two explicitly configured website targets."""
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import threading
@@ -19,6 +20,9 @@ _GLOBAL_IPV6 = ipaddress.ip_network('2000::/3')
 _SPECIAL_NETWORKS = tuple(map(ipaddress.ip_network, (
     '192.0.0.0/24', '192.88.99.0/24', '2001::/23', '2002::/16', '3fff::/20',
 )))
+_STATUS_LINE = re.compile(rb'HTTP/1\.[01] ([1-5][0-9]{2})(?: [^\r\n]*)?\r\n')
+_MAX_LINE = 65536
+_MAX_HEADERS = 100
 
 
 def _remaining(deadline):
@@ -50,6 +54,30 @@ def _public_endpoints(domain):
             yield family, numeric
 
 
+def _final_status(stream, deadline):
+    # Read only response heads. A bare EOF is not a complete head, and an
+    # informational response is not the outcome of the GET.
+    def complete_line():
+        _remaining(deadline)
+        line = stream.readline(_MAX_LINE + 1)
+        if len(line) > _MAX_LINE or not line.endswith(b'\r\n'):
+            raise http.client.HTTPException('Incomplete or oversized response head')
+        return line
+
+    while True:
+        match = _STATUS_LINE.fullmatch(complete_line())
+        if match is None:
+            raise http.client.HTTPException('Invalid status line')
+        for _ in range(_MAX_HEADERS + 1):
+            if complete_line() == b'\r\n':
+                break
+        else:
+            raise http.client.HTTPException('Too many response headers')
+        status = int(match[1])
+        if status >= 200 or status == 101:
+            return status
+
+
 def _request_status(domain, family, endpoint, deadline):
     context = ssl.create_default_context()
     with socket.socket(family, socket.SOCK_STREAM, socket.IPPROTO_TCP) as raw:
@@ -75,13 +103,10 @@ def _request_status(domain, family, endpoint, deadline):
                 request = f'GET / HTTP/1.1\r\nHost: {domain}\r\nConnection: close\r\n\r\n'
                 transport.sendall(request.encode('ascii'))
                 transport.settimeout(_remaining(deadline))
-                response = http.client.HTTPResponse(transport)
-                try:
-                    response.begin()
+                with transport.makefile('rb') as stream:
+                    status = _final_status(stream, deadline)
                     _remaining(deadline)
-                    return response.status
-                finally:
-                    response.close()
+                    return status
             finally:
                 timer.cancel()
 

@@ -442,18 +442,21 @@ class Monitor:
     def cycle(self):
         with self.cycle_lock:
             with self.lock:
-                hosts = copy.deepcopy(self.hosts)
+                # Committed edits replace the host object. Its identity is the
+                # revision marker even if a later edit restores identical values.
+                hosts = [(host, copy.deepcopy(host)) for host in self.hosts]
             with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-                futures = {pool.submit(inspect_host, h): h for h in hosts}
+                futures = {pool.submit(inspect_host, snapshot): (original, snapshot)
+                           for original, snapshot in hosts}
                 for future in concurrent.futures.as_completed(futures):
-                    host = futures[future]
+                    original, host = futures[future]
                     try:
                         last = future.result()
                     except Exception as exc:
                         print('Monitor error:', type(exc).__name__, flush=True)
                         continue
                     with self.lock:
-                        if host not in self.hosts:
+                        if not any(current is original for current in self.hosts):
                             continue
                         state = self.states.setdefault(host['id'], {'history': []})
                         state['last'] = last

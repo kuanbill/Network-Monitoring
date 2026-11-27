@@ -116,7 +116,7 @@ docker compose logs --tail 50
 - **無回應 down**：沒有取得主機可達證據；不代表一定關機，防火牆也可能阻擋探測。獨立網站回應不代表主機可達。
 - 尚未檢查的主機不顯示既有結果。
 
-TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正常；HTTP 200–399 視為成功，不自動跟隨重新導向。Ping 延遲是探測程序耗時的近似值，不是精確的 ICMP RTT；ICMP 不通時可能顯示成功 TCP／HTTP 檢查耗時。
+TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正常；使用主機 IP 的既有 HTTP 檢查接受 200–399，不自動跟隨重新導向。Ping 延遲是探測程序耗時的近似值，不是精確的 ICMP RTT；ICMP 不通時可能顯示成功 TCP／HTTP 檢查耗時。
 
 ### 固定主機的 Docker 與網站監控
 
@@ -132,7 +132,7 @@ TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正�
 1. 在兩台 Linux 以 Agent 帳號確認 `systemctl show docker.service --property=LoadState,ActiveState` 回報系統層級單元已載入並運行。從實際管理端的網路環境確認上表網址透過公開位址正常回應 `2xx`；若只解析到非公開位址、網站固定回應重新導向，或 Docker 為 rootless／不同單元，先核對需求，不要放寬檢查。
 2. 若要啟用 Docker 檢查，備份兩台原本的 `~/.config/systemd/user/netword-agent.service`（依原權限保護），將其原有 `--services ssh` 擴充成 `--services ssh docker.service`。保留其餘啟動參數與環境設定，執行 `systemctl --user daemon-reload` 與 `systemctl --user restart netword-agent.service`。確認服務正常，且管理端的 Agent 指標包含 `ssh` 與 `docker.service`；不需更新 Agent 程式、加入 `docker` 群組或重啟 Docker。
 3. 在既有部署位置更新並重建管理端（Docker 使用 `docker compose up -d --build`）。不要啟動第二套共用資料的管理端。
-4. 從同一管理端的本機 API 讀取設定，對正確的主機 ID 更新旗標。此版不提供網頁開關。以下範例啟用 `.23` 的兩項；對 `.44` 改 `$ip`，或按需要單獨設定一項。執行前請檢查主機、連接埠和權限。
+4. **Docker／原生管理端：**從同一管理端的本機 API 讀取設定，對正確的主機 ID 更新旗標。此版不提供網頁開關。以下範例啟用 `.23` 的兩項；對 `.44` 改 `$ip`，或按需要單獨設定一項。執行前請檢查主機、連接埠和權限。
 
    ```powershell
    $base = 'http://127.0.0.1:8080'
@@ -147,7 +147,11 @@ TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正�
    Invoke-RestMethod "$base/api/hosts/$($target.id)" -Method Put -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
    ```
 
-   不要讀取或傳回 Token；省略 `agent_token` 就會保留。若回復，先用上述 API 將相應旗標改為 `$false`，再還原原 Agent 參數、重新載入並只重啟 Agent。停用 Agent 前須先或同時關閉 Docker 旗標。
+   不要讀取或傳回 Token；省略 `agent_token` 就會保留。
+
+   **Windows 安裝版：**不要執行上面的 API 範例，桌面版有獨立工作階段路徑。從系統匣選「離開」停止桌面管理端（按視窗 X 不會停止）。在同一個受保護的 `%LOCALAPPDATA%\NetwordMonitor\data` 目錄備份 `hosts.json`，用本機編輯器以 UTF-8（無 BOM）編輯原檔；只在對應 `ip` 的既有主機物件內新增或更新 `docker_monitor_enabled`、`website_monitor_enabled` 為 JSON 布林值 `true` 或 `false`。Docker 旗標為 `true` 時須保留 `agent_enabled: true`。不要更動其他欄位或複製、列印檔內 Token。儲存後重新啟動桌面版；若無法啟動，先退出桌面版並在原路徑還原備份。
+
+   **回復：**先用各版本上述方式關閉相應旗標，再還原原 Agent 參數、重新載入並只重啟 Agent。停用 Agent 前須先或同時關閉 Docker 旗標。
 5. 在戰情卡片與主機詳情確認兩項結果。已啟用 Gmail 通知時，Docker 與網站會各自計算異常和恢復；不必停掉正式服務來驗證。
 
 ## Email 異常通知（支援 Google Gmail）

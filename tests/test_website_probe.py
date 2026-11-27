@@ -1,3 +1,4 @@
+import io
 import socket
 import ssl
 import threading
@@ -24,18 +25,18 @@ class WebsiteProbeTests(unittest.TestCase):
         fake_socket = MagicMock()
         fake_socket.__enter__.return_value = fake_socket
         tls = Mock()
-        response = Mock()
-        response.status = 204
         transport = MagicMock()
         transport.__enter__.return_value = transport
+        response = MagicMock(wraps=io.BytesIO(b'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n'))
+        response.__enter__.return_value = response
+        transport.makefile.return_value = response
         tls.wrap_socket.return_value = transport
         resolver_answers = [address(ip) for ip in (
             '127.0.0.1', '10.0.0.1', '100.64.0.1', 'fe80::1', '224.0.0.1',
             '240.0.0.1', '::ffff:8.8.8.8', '8.8.8.8', '2606:4700::1111')]
         with patch.object(probe.socket, 'getaddrinfo', return_value=resolver_answers) as resolve, \
                 patch.object(probe.socket, 'socket', return_value=fake_socket), \
-                patch.object(probe.ssl, 'create_default_context', return_value=tls), \
-                patch.object(probe.http.client, 'HTTPResponse', return_value=response):
+                patch.object(probe.ssl, 'create_default_context', return_value=tls):
             self.assertIs(probe.probe_website(URC)['ok'], True)
             resolve.assert_called_once()
             self.assertEqual(resolve.call_args.args[:2], (DOMAIN, 443))
@@ -47,7 +48,6 @@ class WebsiteProbeTests(unittest.TestCase):
             self.assertIn(b'Host: urc.landagent.com.tw\r\n', request)
             self.assertNotIn(b'Authorization', request)
             response.read.assert_not_called()
-            response.close.assert_called_once()
             resolve.return_value = resolver_answers[:-2]
             fake_socket.reset_mock()
             result = probe.probe_website(URC)
@@ -132,3 +132,21 @@ class WebsiteProbeTests(unittest.TestCase):
             self.assertIn(b'GET / HTTP/1.1', data)
             self.assertTrue(probe._SLOTS['ai.tailan.com.tw'].acquire(timeout=1))
             probe._SLOTS['ai.tailan.com.tw'].release()
+
+    def test_rejects_incomplete_headers_and_waits_for_final_status(self):
+        for wire, expected in (
+            (b'HTTP/1.1 200 OK\r\nX-Header: incomplete', ('connection', False, None)),
+            (b'HTTP/1.1 200 OK\r\nX-Header: complete line\r\n', ('connection', False, None)),
+            (b'HTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n'
+             b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n', ('http', True, 200)),
+            (b'HTTP/1.1 103 Early Hints\r\n\r\n'
+             b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n', ('http', False, 503)),
+        ):
+            with self.subTest(wire=wire), \
+                    patch.object(probe.socket, 'getaddrinfo', return_value=[address('8.8.8.8')]), \
+                    patch.object(probe.socket, 'socket'), \
+                    patch.object(probe.ssl, 'create_default_context') as context:
+                transport = context.return_value.wrap_socket.return_value.__enter__.return_value
+                transport.makefile.return_value = io.BytesIO(wire)
+                result = probe.probe_website(URC)
+                self.assertEqual((result['code'], result['ok'], result.get('http_status')), expected)

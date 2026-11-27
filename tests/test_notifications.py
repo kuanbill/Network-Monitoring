@@ -179,6 +179,7 @@ class IncidentTests(unittest.TestCase):
             self.drain()
         self.assertEqual(self.send.call_count, 1)
         self.assertIn('網站異常', self.send.call_args.args[1])
+        self.assertEqual(self.manager.public()['delivery']['status'], 'idle')
 
     def test_threshold_suppression_recovery_and_second_incident(self):
         self.observe('up', 'down')
@@ -467,6 +468,37 @@ class TransportTests(unittest.TestCase):
 
 
 class MonitorHookTests(unittest.TestCase):
+    def test_reverted_configuration_does_not_publish_stale_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = server.Monitor(directory)
+            manager = monitor.notifications
+            manager.update(dict(config(), failure_threshold=1))
+            manager.worker = Mock()
+            settings = {'ip': '192.168.6.23', 'website_monitor_enabled': True}
+            saved = monitor.change(settings)
+            entered, release = threading.Event(), threading.Event()
+
+            def inspect(host):
+                entered.set()
+                release.wait(3)
+                return {'status': 'degraded', 'host_status': 'up', 'timestamp': time.time(), 'latency_ms': 1,
+                        'website': {'ok': False, 'code': 'connection'}}
+
+            with patch.object(server, 'inspect_host', side_effect=inspect):
+                cycle = threading.Thread(target=monitor.cycle)
+                cycle.start()
+                try:
+                    self.assertTrue(entered.wait(2))
+                    monitor.change(dict(settings, website_monitor_enabled=False), saved['id'])
+                    monitor.change(settings, saved['id'])
+                finally:
+                    release.set()
+                    cycle.join(4)
+                self.assertFalse(cycle.is_alive())
+                self.assertIsNone(monitor.state()['hosts'][0]['last'])
+                self.assertTrue(manager.jobs.empty())
+            manager.close()
+
     def test_reconfigure_only_invalidates_affected_events(self):
         cases = (
             ({'docker_monitor_enabled': False}, {'網站異常'}),

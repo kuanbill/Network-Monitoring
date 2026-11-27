@@ -459,7 +459,11 @@ class NotificationManager:
                 self._status('sending')
             outcome = self._deliver(job, subject, body)
             with self.lock:
-                if outcome is None or not self._valid(job):
+                if not self._valid(job):
+                    if job['generation'] == self.generation and self.delivery['status'] in ('sending', 'timeout'):
+                        self._status('idle')
+                    break
+                if outcome is None:
                     break
                 status, error = outcome
                 self._status(status, error if status != 'partial' else '部分收件人被拒絕；為避免重複寄信，不自動重寄')
