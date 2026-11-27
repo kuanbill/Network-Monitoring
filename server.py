@@ -17,7 +17,8 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
-from config_import import IMPORT_FILE_LIMIT, parse_export, prepare_import
+from config_import import (CHECK_FIELDS, HOST_FIELDS, IMPORT_FILE_LIMIT, NOTIFICATION_FIELDS,
+                           load_configuration_json, parse_export, prepare_import)
 from notifications import DOCKER_UNIT, NotificationManager, validate_settings as validate_notifications
 from website_probe import WEBSITE_DOMAINS, probe_website
 
@@ -328,16 +329,26 @@ class Monitor:
         private_notice = None
         if self.combined_configuration:
             try:
-                data = json.loads(self.configuration_path.read_text(encoding='utf-8'))
+                data = load_configuration_json(self.configuration_path.read_text(encoding='utf-8'))
                 if (not isinstance(data, dict) or set(data) != {'version', 'hosts', 'settings', 'notifications'}
                         or type(data['version']) is not int or data['version'] != 1):
                     raise ValueError()
+                if not isinstance(data['settings'], dict) or data['settings'].keys() != defaults.keys():
+                    raise ValueError()
                 self.settings = validate_settings(data['settings'])
                 if (not isinstance(data['hosts'], list) or len(data['hosts']) > 256 or
-                        not isinstance(data['notifications'], dict)):
+                        not isinstance(data['notifications'], dict) or
+                        data['notifications'].keys() != NOTIFICATION_FIELDS | {'password'}):
                     raise ValueError()
-                if any(not isinstance(h, dict) or not isinstance(h.get('id'), str) or not h['id'] for h in data['hosts']):
-                    raise ValueError()
+                for host in data['hosts']:
+                    if (not isinstance(host, dict) or host.keys() != HOST_FIELDS | {'agent_token'}
+                            or not isinstance(host['id'], str) or not host['id'] or not isinstance(host['ip'], str)
+                            or not isinstance(host['checks'], list) or len(host['checks']) > 16):
+                        raise ValueError()
+                    for check in host['checks']:
+                        if (not isinstance(check, dict) or not isinstance(check.get('type'), str)
+                                or check.keys() != CHECK_FIELDS.get(check['type'])):
+                            raise ValueError()
                 self.hosts = [validate_host(h, h) for h in data['hosts']]
                 if any(len({host[k] for host in self.hosts}) != len(self.hosts) for k in ('id', 'ip')):
                     raise ValueError()
@@ -357,6 +368,7 @@ class Monitor:
         self.last_wol = float('-inf')
         self.config_revision = 0
         self.pending_import = None
+        self.preview_timer = None
 
         self.states = {}
         self.scan = {'running': False, 'progress': 0, 'total': 0, 'results': [], 'error': None}
@@ -376,6 +388,29 @@ class Monitor:
         self.config_revision += 1
         self.pending_import = None
 
+    def _start_preview_timer(self, delay):
+        self.preview_timer = threading.Timer(delay, self._expire_preview)
+        self.preview_timer.daemon = True
+        self.preview_timer.start()
+
+    def _expire_preview(self):
+        with self.lock:
+            self.preview_timer = None
+            if self.pending_import:
+                remaining = self.pending_import[1] - time.monotonic()
+                if remaining > 0:
+                    self._start_preview_timer(remaining)
+                else:
+                    self.pending_import = None
+
+    def close(self):
+        with self.lock:
+            self.pending_import = None
+            if self.preview_timer:
+                self.preview_timer.cancel()
+                self.preview_timer = None
+        self.notifications.close()
+
     def preview_import(self, document: dict) -> dict:
         with self.lock, self.notifications.lock:
             current = {'hosts': self.hosts, 'settings': self.settings, 'notifications': self.notifications.settings}
@@ -383,6 +418,8 @@ class Monitor:
                                                 validate_frequency=validate_settings)
             token = secrets.token_urlsafe(24)
             self.pending_import = (token, time.monotonic() + PREVIEW_TTL, self.config_revision, candidate)
+            if self.preview_timer is None:
+                self._start_preview_timer(PREVIEW_TTL)
             return {**copy.deepcopy(summary), 'confirmation_token': token}
 
     def apply_import(self, confirmation_token: str) -> dict:
@@ -803,7 +840,7 @@ class Server(ThreadingHTTPServer):
 
     def server_close(self):
         if hasattr(self, 'monitor'):
-            self.monitor.notifications.close()
+            self.monitor.close()
         super().server_close()
 
     def get_request(self):

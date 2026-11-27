@@ -17,7 +17,7 @@ class ImportTransactionTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.monitor = server.Monitor(self.directory.name)
-        self.addCleanup(self.monitor.notifications.close)
+        self.addCleanup(self.monitor.close)
         self.host = self.monitor.change({'ip': '127.0.0.1', 'agent_enabled': True, 'agent_token': 'w' * 24})
         self.monitor.update_settings({'refresh_interval': 5})
 
@@ -107,6 +107,63 @@ class ImportTransactionTests(unittest.TestCase):
                 return False
         with ThreadPoolExecutor(max_workers=2) as pool:
             self.assertEqual(sorted(pool.map(lambda _: confirm(), range(2))), [False, True])
+
+    def test_private_configuration_rejects_missing_fields_or_duplicate_keys(self):
+        m = self.monitor
+        m.apply_import(self.preview(m.export_config()))
+        private_path = m.configuration_path
+        pristine = json.loads(private_path.read_text(encoding='utf-8'))
+        for key, section in (('agent_port', 'hosts'), ('agent_token', 'hosts'),
+                             ('smtp_host', 'notifications'), ('password', 'notifications'),
+                             ('monitor_interval', 'settings')):
+            with self.subTest(key=key):
+                broken = copy.deepcopy(pristine)
+                record = broken[section][0] if section == 'hosts' else broken[section]
+                del record[key]
+                private_path.write_text(json.dumps(broken), encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, r'configuration\.json'):
+                    server.Monitor(self.directory.name)
+        duplicate = json.dumps(pristine).replace('"agent_port": 9105', '"agent_port": 9105, "agent_port": 9106')
+        private_path.write_text(duplicate, encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, r'configuration\.json'):
+            server.Monitor(self.directory.name)
+
+    def test_import_cancels_mail_that_has_not_started_transport(self):
+        m = self.monitor
+        notice = m.notifications
+        notice.worker = Mock()
+        m.update_notifications({'smtp_host': 'mail.example.com', 'sender': 'test@example.com',
+                                'recipients': ['receiver@example.com']})
+        notice.test()
+        job = notice.jobs.get_nowait()
+        original_deliver = notice._deliver
+        code = self.preview()
+
+        def committed_before_transport(*args):
+            m.apply_import(code)
+            return original_deliver(*args)
+
+        with patch.object(notice, '_deliver', side_effect=committed_before_transport), \
+                patch('notifications.send_email') as send:
+            notice._process(job)
+        send.assert_not_called()
+        self.assertEqual(notice.public()['delivery']['status'], 'idle')
+
+    def test_preview_releases_candidate_after_deadline_without_apply(self):
+        m = self.monitor
+        expired = threading.Event()
+        original = m._expire_preview
+        def expiry():
+            original()
+            if m.pending_import is None:
+                expired.set()
+        with patch.object(server, 'PREVIEW_TTL', 0.05), patch.object(m, '_expire_preview', side_effect=expiry):
+            code = self.preview()
+            self.assertIsNotNone(m.pending_import)
+            self.assertTrue(expired.wait(2))
+            self.assertIsNone(m.pending_import)
+        with self.assertRaises(server.ImportConflict):
+            m.apply_import(code)
 
     def test_import_discards_stale_measurement_and_email_job(self):
         m = self.monitor

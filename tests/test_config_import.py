@@ -84,6 +84,9 @@ class ImportValidationTests(unittest.TestCase):
         self.assertFalse(summary['smtp_password_needed'])
         self.assertNotIn(password, repr(summary))
         self.assertNotIn(token, repr(summary))
+        _, changed_account = prepare(export([host], **(notify | {'username': 'other@gmail.com'})), current)
+        self.assertTrue(changed_account['notifications']['account_changed'])
+        self.assertFalse(changed_account['notifications']['target_changed'])
         for overrides in ({'smtp_port': 465}, {'smtp_host': 'mail.example.com'},
                           {'username': 'other@gmail.com'}, {'security': 'ssl'}):
             candidate, summary = prepare(export([dict(host, agent_port=9106)], **(notify | overrides)), current)

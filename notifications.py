@@ -462,7 +462,6 @@ class NotificationManager:
                 if not self._valid(job):
                     break
                 subject, body = self._content(job)
-                self._status('sending')
             outcome = self._deliver(job, subject, body)
             with self.lock:
                 if not self._valid(job):
@@ -496,6 +495,12 @@ class NotificationManager:
         outcome = []
         def deliver():
             try:
+                # Claim this attempt under the same lock as configuration
+                # commits; queued work cannot claim after its generation changed.
+                with self.lock:
+                    if not self._valid(job):
+                        return
+                    self._status('sending')
                 outcome.append(('sent' if send_email(job['settings'], subject, body) else 'partial', ''))
             except DeliveryUncertain:
                 outcome.append(('uncertain', 'SMTP 接受結果未確定；為避免重複寄信，不自動重寄'))
@@ -508,12 +513,12 @@ class NotificationManager:
         transport.start()
         if not done.wait(DELIVERY_DEADLINE):
             with self.lock:
-                if job['generation'] == self.generation:
+                if self._valid(job):
                     self._status('timeout', 'SMTP 寄送逾時，結果未確定；等待原連線結束，不重複建立連線')
             while not done.wait(0.2):
                 if self.stop.is_set():
                     return
-        return outcome[0]
+        return outcome[0] if outcome else None
 
     def close(self):
         self.stop.set()

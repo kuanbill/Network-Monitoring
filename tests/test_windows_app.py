@@ -1,4 +1,6 @@
 """Desktop tests always use temporary settings and an isolated loopback port."""
+import http.client
+from contextlib import closing
 import importlib.util
 import json
 import os
@@ -160,6 +162,12 @@ class DesktopTests(unittest.TestCase):
             confirmation = json.dumps({'confirmation_token': result['confirmation_token']}).encode()
             self.assertEqual(post(unscoped + apply, confirmation)[0], 404)
             self.assertEqual(post(unscoped + '/__desktop__/stale-session' + apply, confirmation)[0], 404)
+            # The desktop server accepts origin-form HTTP targets, not proxy targets.
+            with closing(http.client.HTTPConnection('127.0.0.1', controller.port, timeout=3)) as connection:
+                connection.request('GET', unscoped + '/api/state')
+                response = connection.getresponse()
+                self.assertEqual(response.status, 404)
+                response.read()
             self.assertFalse((self.directory / 'data' / 'configuration.json').exists())
             self.assertEqual(post(base + apply, confirmation)[0], 200)
             self.assertTrue((self.directory / 'data' / 'configuration.json').exists())

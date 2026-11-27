@@ -911,6 +911,7 @@
     summary.append(el('p', '', `畫面同步：${settings.refresh_interval} 秒；背景監測：${settings.monitor_interval} 秒。`),
       el('p', '', `郵件通知：${notifications.enabled ? '啟用' : '停用'}。SMTP ${notifications.target_changed ? '改為' : '維持'} ${notifications.smtp_host}:${notifications.smtp_port}（${notifications.security === 'ssl' ? 'TLS' : 'STARTTLS'}）。`),
       el('p', '', `收件人${notifications.recipients_changed ? '改為' : '維持'}：${notifications.recipients.join('、') || '未設定'}。`));
+    if (notifications.account_changed) summary.append(el('p', '', 'SMTP 登入帳號將變更。'));
     if (data.agent_credentials_needed.length) {
       summary.append(el('p', '', '以下主機缺少符合的 Agent Token。匯入後請在主機編輯中重新輸入 Token 並啟用 Agent：'));
       const list = el('ul');

@@ -33,10 +33,7 @@ def parse_export(raw: bytes) -> dict:
     if len(raw) > IMPORT_FILE_LIMIT:
         raise ValueError('設定檔不可超過 40 MiB')
     try:
-        document = json.loads(raw.decode('utf-8-sig'), object_pairs_hook=_strict_pairs,
-                              parse_constant=_finite, parse_float=_finite)
-        # Escaped lone surrogates can survive strict UTF-8 decoding of the file.
-        _validate_text(document)
+        document = load_configuration_json(raw.decode('utf-8-sig'))
     except (ValueError, RecursionError):
         raise ValueError('設定檔不是有效的 UTF-8 JSON，或含有重複欄位或無效數值') from None
     if not isinstance(document, dict) or document.keys() != SECTIONS:
@@ -65,6 +62,13 @@ def parse_export(raw: bytes) -> dict:
     return document
 
 
+def load_configuration_json(text: str):
+    document = json.loads(text, object_pairs_hook=_strict_pairs, parse_constant=_finite, parse_float=_finite)
+    # Escaped lone surrogates can survive strict UTF-8 decoding of the file.
+    _validate_text(document)
+    return document
+
+
 def _validate_text(value):
     if isinstance(value, str):
         value.encode('utf-8')
@@ -82,7 +86,7 @@ def _public_host(host):
 
 
 def _smtp_destination(settings):
-    return (settings['smtp_host'].lower(), settings['smtp_port'], settings['security'], settings['username'])
+    return settings['smtp_host'].lower(), settings['smtp_port'], settings['security']
 
 
 def prepare_import(document, current, *, normalize_ip, validate_host, validate_frequency) -> tuple[dict, dict]:
@@ -121,7 +125,8 @@ def prepare_import(document, current, *, normalize_ip, validate_host, validate_f
     except (ValueError, TypeError):
         raise ValueError('郵件通知設定無效，請檢查 SMTP 與收件人設定') from None
     target_changed = _smtp_destination(notice) != _smtp_destination(old_notice)
-    if not target_changed:
+    account_changed = notice['username'] != old_notice['username']
+    if not target_changed and not account_changed:
         notice['password'] = old_notice['password']
     missing_password = bool(notice['enabled'] and notice['username'] and not notice['password'])
     if missing_password:
@@ -131,6 +136,7 @@ def prepare_import(document, current, *, normalize_ip, validate_host, validate_f
         'hosts': counts, 'settings': dict(settings),
         'notifications': {**{key: notice[key] for key in ('enabled', 'smtp_host', 'smtp_port', 'security', 'recipients')},
                           'target_changed': target_changed,
+                          'account_changed': account_changed,
                           'recipients_changed': notice['recipients'] != old_notice['recipients']},
         'agent_credentials_needed': missing_agents, 'smtp_password_needed': missing_password,
     }
