@@ -46,7 +46,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 ## Windows 安裝版（獨立視窗＋系統匣）
 
 支援 Windows 10／11 x64，目標電腦不需 Python 或 Docker，但需 Microsoft Edge WebView2 Runtime（多數電腦已內建；缺少時請從 https://developer.microsoft.com/microsoft-edge/webview2/ 安裝 Evergreen Runtime）。不會自動下載或要求管理員權限，也不會改用舊版 IE 引擎。安裝檔為
-`dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
+`dist/installer/NetwordMonitor-Setup-1.4.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
 
 - 安裝僅供目前使用者，不需管理員權限。安裝目錄為 `%LOCALAPPDATA%\Programs\NetwordMonitor`。
 - 啟動後自動開始監控並開啟獨立 WebView2 桌面視窗，不另開瀏覽器分頁。右下系統匣可開啟介面、啟動／停止監控、開啟資料／日誌資料夾及離開。圖示可能位於隱藏圖示區；按視窗 X 會隱藏至系統匣並繼續監控，從系統匣選「離開」才會結束程式。
@@ -75,7 +75,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Iscc "C:\Path\To\ISCC.exe"
 # 僅測試安裝包，使用臨時資料與隨機連接埠，不觸碰正式設定：
-python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe
+python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.4.0-x64.exe
 # 已有正式桌面安裝時不覆寫其登錄，改驗證可攜式後端：
 python tests/windows_package_smoke.py --exe dist/NetwordMonitor/NetwordMonitor.exe
 # 真實 WebView2／系統匣介面測試，同樣使用臨時資料與隨機連接埠：
