@@ -30,6 +30,10 @@ let backend, browser, socket;
 let nextId = 0;
 const pending = new Map();
 const errors = [];
+const expectedImportErrors = new Map([
+  ['/api/config/import/preview', 'status of 400'],
+  ['/api/config/import/apply', 'status of 409'],
+]);
 async function command(method, params = {}) {
   const id = ++nextId;
   return new Promise((resolve, reject) => {
@@ -60,7 +64,12 @@ try {
       if (data.error) item.reject(new Error(JSON.stringify(data.error))); else item.resolve(data.result);
     }
     if (data.method === 'Runtime.exceptionThrown') errors.push(JSON.stringify(data.params.exceptionDetails));
-    if (data.method === 'Log.entryAdded' && data.params.entry.level === 'error' && !data.params.entry.url?.endsWith('/favicon.ico')) errors.push(data.params.entry.text);
+    if (data.method === 'Log.entryAdded' && data.params.entry.level === 'error' && !data.params.entry.url?.endsWith('/favicon.ico')) {
+      const entry = data.params.entry;
+      if (![...expectedImportErrors].some(([path, text]) => entry.url === base + path && entry.text.includes(text))) {
+        errors.push(entry.text);
+      }
+    }
   };
   await command('Runtime.enable');
   await command('Log.enable');
@@ -114,7 +123,8 @@ try {
   await until(() => evaluate(`!document.querySelector('#save-notification').disabled`), 'email clear completed');
   await evaluate(`document.querySelector('#notification-dialog').close()`);
   // Frequency settings persist in this isolated server and reschedule the active page timer.
-  await evaluate(`document.querySelector('#open-settings').click()`);
+  assert.equal(await evaluate(`!!document.querySelector('.sidebar #nav-settings') && !document.querySelector('.panel-footer #open-settings')`), true, 'settings lives in the sidebar');
+  await evaluate(`document.querySelector('#nav-settings').click()`);
   await until(() => evaluate(`!document.querySelector('#save-settings').disabled`), 'frequency settings loaded');
   assert.equal(await evaluate(`document.querySelector('#refresh-interval').value`), '5');
   assert.equal(await evaluate(`document.querySelector('#settings-dialog').scrollWidth<=document.querySelector('#settings-dialog').clientWidth`), true, 'frequency dialog fits mobile');
@@ -126,7 +136,7 @@ try {
   await evaluate(`window.__frequencyFetch=window.fetch; window.__statePolls=0; window.fetch=(path,options)=>{if(String(path)==='/api/state')window.__statePolls++; return window.__frequencyFetch(path,options)}`);
   await delay(2700);
   assert.ok(await evaluate(`window.__statePolls>=2 && window.__statePolls<=3`), 'new 1-second timer replaces old timer without duplication');
-  await evaluate(`window.fetch=window.__frequencyFetch; document.querySelector('#open-settings').click()`);
+  await evaluate(`window.fetch=window.__frequencyFetch; document.querySelector('#nav-settings').click()`);
   await until(() => evaluate(`!document.querySelector('#save-settings').disabled`), 'frequency reopened');
   assert.equal(await evaluate(`document.querySelector('#monitor-interval').value`), '60');
   await evaluate(`document.querySelector('#settings-dialog').close()`);
@@ -135,6 +145,60 @@ try {
   // A second client changes the shared setting; this page picks it up via /api/state.
   await fetch(base + '/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({monitor_interval:30})});
   await until(() => evaluate(`document.querySelector('#interval-label').textContent.includes('30 秒')`), 'shared frequency change synchronized');
+  // Real import requests use only this temporary server and loopback hosts.
+  const priorConfig = await (await fetch(base + '/api/config/export')).json();
+  const upcoming = structuredClone(priorConfig);
+  upcoming.settings = {refresh_interval:1, monitor_interval:45};
+  upcoming.hosts = [{ip:'127.0.0.2', name:'匯入 <img src=x>', agent_enabled:true, agent_port:9105}];
+  upcoming.notifications.smtp_host = 'mail.example.com';
+  const upcomingJSON = JSON.stringify(upcoming);
+  await command('Emulation.setDeviceMetricsOverride', {width:320,height:740,deviceScaleFactor:1,mobile:true});
+  await evaluate(`document.querySelector('#nav-settings').focus()`);
+  assert.equal(await evaluate('document.activeElement.id'), 'nav-settings', 'mobile settings can receive keyboard focus');
+  await command('Input.dispatchKeyEvent', {type:'rawKeyDown',key:' ',code:'Space',windowsVirtualKeyCode:32,nativeVirtualKeyCode:32});
+  await command('Input.dispatchKeyEvent', {type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32,nativeVirtualKeyCode:32});
+  await until(() => evaluate(`document.querySelector('#settings-dialog').open && !document.querySelector('#save-settings').disabled`), 'settings opens by keyboard on mobile');
+  await evaluate(`window.__download = null; window.__createConfigURL = URL.createObjectURL;
+    URL.createObjectURL = (blob) => { window.__download = blob.text(); return window.__createConfigURL(blob); };
+    document.querySelector('#export-config').click()`);
+  await until(() => evaluate(`!!window.__download`), 'export creates a downloadable JSON file');
+  assert.deepEqual(JSON.parse(await evaluate('window.__download')), priorConfig);
+  await evaluate('URL.createObjectURL = window.__createConfigURL');
+  await evaluate(`window.__selectConfig = (text) => {
+    const input = document.querySelector('#import-config-file'); const files = new DataTransfer();
+    files.items.add(new File([text], 'netword-settings.json', {type:'application/json'}));
+    input.files = files.files; input.dispatchEvent(new Event('change', {bubbles:true}));
+  }; document.querySelector('#monitor-interval').value='123'; window.__selectConfig(${JSON.stringify('\ufeff' + upcomingJSON)})`);
+  await until(() => evaluate(`!document.querySelector('#import-preview').hidden`), 'replacement preview ready');
+  assert.ok(await evaluate(`{const p=document.querySelector('#import-preview'); p.textContent.includes('移除') && p.textContent.includes('127.0.0.1') && p.textContent.includes('45 秒') && p.textContent.includes('127.0.0.2') && p.textContent.includes('Token') && p.textContent.includes('<img src=x>') && !p.querySelector('img')}`));
+  assert.ok(await evaluate(`{const d=document.querySelector('#settings-dialog'); d.scrollWidth <= d.clientWidth && document.documentElement.scrollWidth <= innerWidth}`), 'import preview fits 320px');
+  await evaluate(`document.querySelector('#cancel-import').click()`);
+  assert.equal(await evaluate(`document.querySelector('#import-preview').hidden`), true);
+  assert.deepEqual(await (await fetch(base + '/api/config/export')).json(), priorConfig, 'cancel never writes settings');
+  await evaluate(`window.__selectConfig(${JSON.stringify(upcomingJSON.replace('"version":1', '"version":1,"version":1'))})`);
+  await until(() => evaluate(`!document.querySelector('#import-error').hidden && document.querySelector('#import-error').textContent.includes('重複')`), 'duplicate keys refused by server');
+  const emptyImport = {...upcoming, hosts:[]};
+  await evaluate(`window.__selectConfig(${JSON.stringify(JSON.stringify(emptyImport))})`);
+  await until(() => evaluate(`document.querySelector('#import-preview').textContent.includes('清空') && !document.querySelector('#import-preview').hidden`), 'empty import warning');
+  await evaluate(`window.__selectConfig(${JSON.stringify(upcomingJSON)})`);
+  await until(() => evaluate(`!document.querySelector('#import-preview').hidden && document.querySelector('#import-preview').textContent.includes('127.0.0.2')`), 'select same file again');
+  await fetch(base + '/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:'{"monitor_interval":35}'});
+  await evaluate(`document.querySelector('#apply-import').click()`);
+  await until(() => evaluate(`document.querySelector('#import-error').textContent.includes('失效') && document.querySelector('#import-preview').hidden`), 'stale preview requires choosing file again');
+  await evaluate(`window.__selectConfig(${JSON.stringify(upcomingJSON)})`);
+  await until(() => evaluate(`!document.querySelector('#import-preview').hidden`), 'fresh preview after expiry');
+  await evaluate(`document.querySelector('#apply-import').click()`);
+  await until(() => evaluate(`document.querySelector('#monitor-interval').value==='45' && document.querySelector('#import-status').textContent.includes('已匯入')`), 'apply replaces the unfinished frequency draft');
+  const imported = await (await fetch(base + '/api/config/export')).json();
+  assert.deepEqual(imported.settings, upcoming.settings);
+  assert.equal(imported.hosts.length, 1);
+  assert.equal(imported.hosts[0].ip, '127.0.0.2');
+  assert.equal(imported.hosts[0].agent_enabled, false);
+  assert.equal(imported.notifications.smtp_host, 'mail.example.com');
+  assert.ok(!JSON.stringify(imported).includes('agent_token') && !JSON.stringify(imported).includes('"password"'));
+  await evaluate(`document.querySelector('#settings-dialog').close()`);
+  await until(() => evaluate(`document.querySelector('#host-rows').textContent.includes('127.0.0.2')`), 'overview refreshes after import');
+  await command('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});
   // Keep fixture data inside this page; never modify deployed hosts or saved tokens.
   const fixture = {interval:30, settings:{refresh_interval:1,monitor_interval:30}, hosts:Array.from({length:4}, (_, index) => ({
     id:`fixture-${index}`, name:`Fixture ${index}`, ip:`192.168.8.${index+1}`, agent_enabled:index!==3, history:[],

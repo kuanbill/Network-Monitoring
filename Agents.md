@@ -35,6 +35,7 @@
 - `data/settings.json`：共用畫面同步與背景監測間隔，原子保存，重啟保留；Windows 版使用其獨立資料目錄，不隨安裝包提供。
 - `data/hosts.json`：主機設定與 Agent Token；屬機密資料，不可提交版本控制或打包進映像。
 - `data/notifications.json`：通知設定與明文 SMTP 密碼，同屬機密資料；密碼只供寫入，省略保留、空字串清除，API 僅回傳 `password_set`。
+- `data/configuration.json`：首次成功匯入後以單檔原子保存全部設定；存在時優先於舊三檔。含機密，不可提交、打包或記錄；完整還原以停機備份的資料目錄為準。
 - `tests/test_server.py`：管理端驗證、狀態判定、HTTP 安全、保存與逾時測試。
 - `tests/test_agent.py`：Agent 指標、認證、來源限制及請求處理測試。
 - `tests/test_integration.py`：具備 psutil 時執行的真實 Agent 整合測試。
@@ -84,6 +85,7 @@ docker compose down
 
 - `GET /api/state`：全部主機、最新檢查、Agent 指標、近期歷史、相容欄位 `interval` 與 `settings` 更新頻率設定。
 - `GET /api/settings`、`PUT /api/settings`：共用更新頻率；`refresh_interval` 為 1–3600 整數秒、`monitor_interval` 為 5–3600 整數秒，拒絕布林、字串及未知欄位。省略欄位保留現值，保存失敗不得修改記憶體。
+- `GET /api/config/export`、`POST /api/config/import/preview`、`POST /api/config/import/apply`：無憑證的 v1 設定匯出、整檔預覽與全量取代。預覽回傳的確認碼只供本機管理端使用，有效 10 分鐘；實際設定變更時作廢。
 - `POST /api/hosts`、`PUT /api/hosts/{id}`、`DELETE /api/hosts/{id}`：主機設定維護。
 - `POST /api/refresh`：安排背景立即檢查，不保證回應當下已完成量測。
 - `POST /api/scan`：提交 `{range, ports}` 探索工作。
@@ -104,7 +106,7 @@ docker compose down
 - `down`：沒有取得可達證據，不等同證明主機關機。
 - 無歷史或尚未檢查時，前端顯示待檢查，不可視為正常。
 
-監測預設每輪完成後等待 30 秒；前端預設每 5 秒同步 API，兩者不是相同量測頻率。面板下方「更新頻率設定」可分別調整並保存至 `settings.json`；已保存監測值優先於 CLI `--interval` 的啟動預設值。監測間隔改變會喚醒等待並安排新一輪檢查，畫面同步變更不觸發量測；其他畫面在下次同步時套用。不變更 Agent 自身的 5 秒收集頻率。每台保留最近 120 筆狀態在記憶體，重啟後重新累積。主機設定以原子替換保存，保存失敗須回復記憶體，避免畫面與檔案不一致。
+監測預設每輪完成後等待 30 秒；前端預設每 5 秒同步 API，兩者不是相同量測頻率。左側「設定」可調整更新頻率；已保存監測值優先於 CLI `--interval` 的啟動預設值。監測間隔改變會喚醒等待並安排新一輪檢查，畫面同步變更不觸發量測；其他畫面在下次同步時套用。不變更 Agent 自身的 5 秒收集頻率。每台保留最近 120 筆狀態在記憶體，重啟後重新累積。主機設定以原子替換保存，保存失敗須回復記憶體，避免畫面與檔案不一致。
 
 探索只接受指定私有 IPv4 與本機回環範圍，單次最多 1024 位址；空連接埠清單表示只使用 Ping。Docker 內的 `127.0.0.1` 指容器自己，監控 Windows 管理主機應使用 `192.168.6.6`。
 

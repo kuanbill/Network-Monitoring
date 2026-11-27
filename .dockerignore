@@ -3,5 +3,6 @@
 !server.py
 !notifications.py
 !website_probe.py
+!config_import.py
 !static/
 !static/**

@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import server
+from config_import import IMPORT_FILE_LIMIT
 
 
 def valid_metrics():
@@ -357,6 +358,68 @@ class HTTPProbeTests(unittest.TestCase):
 
 
 class APITests(unittest.TestCase):
+    def raw_import(self, endpoint, raw, headers=None):
+        with socket.create_connection(('127.0.0.1', self.server.server_port), timeout=3) as connection:
+            request = [('Host', f'127.0.0.1:{self.server.server_port}'),
+                       ('Content-Length', str(len(raw))), ('Content-Type', 'application/json')]
+            request = dict(request) | (headers or {})
+            head = '\r\n'.join([f'POST {endpoint} HTTP/1.1', *(f'{k}: {v}' for k, v in request.items()), '', ''])
+            connection.sendall(head.encode('ascii') + raw)
+            response = http.client.HTTPResponse(connection)
+            response.begin()
+            return response.status, json.loads(response.read())
+
+    def test_import_api_validates_raw_file_and_scope(self):
+        preview_path = '/api/config/import/preview'
+        apply_path = '/api/config/import/apply'
+        _, base = self.request('GET', '/api/config/export')
+        raw = json.dumps(base).encode()
+        for headers in ({'Origin': 'https://invalid.example'}, {'Host': 'invalid.example'}):
+            self.assertEqual(self.raw_import(preview_path, raw, headers)[0], 403)
+            self.assertEqual(self.raw_import(apply_path, b'{}', headers)[0], 403)
+        duplicate = raw.replace(b'"version": 1', b'"version":1,"version":1')
+        self.assertEqual(self.raw_import(preview_path, duplicate)[0], 400)
+        self.assertEqual(self.raw_import(preview_path, b'', {'Content-Length': str(IMPORT_FILE_LIMIT + 1)})[0], 413)
+        self.assertEqual(self.raw_import('/api/refresh', b' ' * 32769)[0], 400)
+        self.assertEqual(self.request('PUT', preview_path, {})[0], 404)
+        self.assertFalse(self.server.monitor.configuration_path.exists())
+        status, result = self.raw_import(preview_path, b'\xef\xbb\xbf' + raw + b' ' * 34000)
+        self.assertEqual(status, 200)
+        self.assertFalse(self.server.monitor.configuration_path.exists())
+        payload = {'confirmation_token': result['confirmation_token']}
+        self.assertEqual(self.request('POST', apply_path, payload | {'hosts': []})[0], 400)
+        self.assertEqual(self.request('POST', apply_path, payload)[0], 200)
+        self.assertTrue(self.server.monitor.configuration_path.exists())
+        self.assertEqual(self.request('POST', apply_path, payload)[0], 409)
+        status, result = self.raw_import(preview_path, raw)
+        self.assertEqual(status, 200)
+        self.request('PUT', '/api/notifications', {'password': 'new-secret'})
+        self.assertEqual(self.request('POST', apply_path, {'confirmation_token': result['confirmation_token']})[0], 409)
+
+    def test_only_one_import_body_can_be_parsed_at_a_time(self):
+        preview_path = '/api/config/import/preview'
+        entered, release = threading.Event(), threading.Event()
+        results = []
+        _, config = self.request('GET', '/api/config/export')
+        raw = json.dumps(config).encode()
+        preview = self.server.monitor.preview_import
+        def delayed(document):
+            entered.set()
+            release.wait(4)
+            return preview(document)
+        with patch.object(self.server.monitor, 'preview_import', side_effect=delayed):
+            thread = threading.Thread(target=lambda: results.append(self.raw_import(preview_path, raw)[0]), daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(self.raw_import(preview_path, raw)[0], 429)
+                self.assertEqual(self.request('GET', '/api/state')[0], 200)
+            finally:
+                release.set()
+                thread.join(4)
+        self.assertEqual(results, [200])
+        self.assertEqual(self.raw_import(preview_path, raw)[0], 200)
+
     def test_fixed_flags_validation_persistence_and_export(self):
         flags = {'docker_monitor_enabled': True, 'website_monitor_enabled': True}
         for flag in flags:

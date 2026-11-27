@@ -1,5 +1,5 @@
 """Exercise the real frozen executable/installer without touching production or port 8080.
-Run: python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe
+Run: python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.4.0-x64.exe
 """
 import argparse
 import json

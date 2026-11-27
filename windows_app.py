@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
 
 APP_NAME = 'Netword 主機監控'
 URL = 'http://127.0.0.1:8080'
@@ -129,11 +130,23 @@ def run_backend(directory, stop_name, ready_name, port=8080, parent_pid=0, sessi
         def authorized_origin(self):
             if not super().authorized_origin():
                 return False
-            if prefix and self.path.startswith(prefix + '/'):
-                self.path = self.path[len(prefix):]
-            elif prefix and self.path.startswith('/api/'):
-                self.send_json(404, {'error': '桌面工作階段已結束'})
-                return False
+            if prefix:
+                try:
+                    target = urlsplit(self.path)
+                except ValueError:
+                    self.send_json(404, {'error': '找不到資源'})
+                    return False
+                if not self.path.startswith('/') or target.scheme or target.netloc:
+                    self.send_json(404, {'error': '找不到資源'})
+                    return False
+                path = target.path
+                if path.startswith(prefix + '/') and not path[len(prefix):].startswith('//'):
+                    self.path = path[len(prefix):]
+                elif path.startswith('/api/'):
+                    self.send_json(404, {'error': '桌面工作階段已結束'})
+                    return False
+                else:
+                    self.path = path
             return True
 
         def do_GET(self):

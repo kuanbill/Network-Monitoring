@@ -33,7 +33,7 @@ class DeliveryUncertain(Exception):
     """The connection failed during DATA; SMTP may already have accepted it."""
 
 
-def validate_settings(data, previous=None, complete=False):
+def validate_settings(data, previous=None, complete=False, *, allow_missing_password=False):
     if not isinstance(data, dict):
         raise ValueError('通知設定須為 JSON 物件')
     settings = copy.deepcopy(DEFAULTS if previous is None else previous)
@@ -75,7 +75,7 @@ def validate_settings(data, previous=None, complete=False):
             raise ValueError('請設定寄件人及至少一位收件人')
         if settings['smtp_host'].lower() == 'smtp.gmail.com' and not settings['username']:
             raise ValueError('Gmail 請設定完整登入 Email 及應用程式密碼')
-        if settings['username'] and not settings['password']:
+        if settings['username'] and not settings['password'] and not allow_missing_password:
             raise ValueError('SMTP 登入帳號需要密碼；Gmail 請使用應用程式密碼')
     return settings
 
@@ -173,11 +173,13 @@ def failure_explanation(detail, agent=False):
 
 
 class NotificationManager:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, *, settings=None):
         self.path = Path(data_dir) / 'notifications.json'
         self.lock = threading.RLock()
         self.settings = copy.deepcopy(DEFAULTS)
-        if self.path.exists():
+        if settings is not None:
+            self.settings = validate_settings(settings)
+        elif self.path.exists():
             self.settings = validate_settings(json.loads(self.path.read_text(encoding='utf-8')))
         self.generation = 0
         self.records = {}
@@ -211,13 +213,17 @@ class NotificationManager:
                 os.replace(temporary, self.path)
             finally:
                 temporary.unlink(missing_ok=True)
-            # Commit only after persistence succeeded. Old queued jobs become invalid.
+            self.commit_settings(settings)
+            return self.public()
+
+    def commit_settings(self, settings):
+        """Publish already validated, persisted settings and invalidate old jobs."""
+        with self.lock:
             self.settings = settings
             self.generation += 1
             self.records.clear()
             self.host_versions.clear()
             self.delivery = {'status': 'idle', 'timestamp': None, 'error': ''}
-            return self.public()
 
     def _status(self, status, error=''):
         self.delivery = {'status': status, 'timestamp': time.time(), 'error': error}
@@ -456,7 +462,6 @@ class NotificationManager:
                 if not self._valid(job):
                     break
                 subject, body = self._content(job)
-                self._status('sending')
             outcome = self._deliver(job, subject, body)
             with self.lock:
                 if not self._valid(job):
@@ -490,6 +495,12 @@ class NotificationManager:
         outcome = []
         def deliver():
             try:
+                # Claim this attempt under the same lock as configuration
+                # commits; queued work cannot claim after its generation changed.
+                with self.lock:
+                    if not self._valid(job):
+                        return
+                    self._status('sending')
                 outcome.append(('sent' if send_email(job['settings'], subject, body) else 'partial', ''))
             except DeliveryUncertain:
                 outcome.append(('uncertain', 'SMTP 接受結果未確定；為避免重複寄信，不自動重寄'))
@@ -502,12 +513,12 @@ class NotificationManager:
         transport.start()
         if not done.wait(DELIVERY_DEADLINE):
             with self.lock:
-                if job['generation'] == self.generation:
+                if self._valid(job):
                     self._status('timeout', 'SMTP 寄送逾時，結果未確定；等待原連線結束，不重複建立連線')
             while not done.wait(0.2):
                 if self.stop.is_set():
                     return
-        return outcome[0]
+        return outcome[0] if outcome else None
 
     def close(self):
         self.stop.set()

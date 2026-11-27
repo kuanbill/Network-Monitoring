@@ -28,18 +28,25 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 
 ### 調整更新頻率
 
-在主機面板下方按「更新頻率設定」：
+在左側工具列按「設定」，找到「更新頻率」：
 
 - **畫面同步間隔**：1–3600 秒，預設 5 秒；只同步管理端資料，不會重新量測主機。
 - **背景監測間隔**：5–3600 秒，預設 30 秒；每輪量測完成後等待此秒數，主機多或逾時時，實際量測間隔更長。
 - 儲存後目前畫面立即套用；背景監測間隔有變更時會安排新一輪檢查。其他已開啟的畫面在下次同步時套用。
-- 設定保存在資料目錄的 `settings.json`，重新啟動仍保留。Windows 版為 `%LOCALAPPDATA%\NetwordMonitor\data\settings.json`；Docker／原生版預設為專案 `data/settings.json`。`GET /api/settings`、`PUT /api/settings` 使用 `refresh_interval`、`monitor_interval` 整數秒數。
+- 設定會保存，重新啟動仍保留。一般為資料目錄的 `settings.json`；曾成功匯入的安裝則保存於 `configuration.json`。`GET /api/settings`、`PUT /api/settings` 使用 `refresh_interval`、`monitor_interval` 整數秒數。
 - 更短的間隔會增加網路／主機負載，也會影響以連續輪次確認的異常通知時間；不會改變 Agent 本身的指標收集頻率。
+
+### 匯出與匯入設定
+
+- 在左側「設定」按「匯出設定」，下載目前的主機清單、更新頻率及郵件設定。JSON **不含 Agent Token 或 SMTP 密碼**，但仍可能包含內部 IP、檢查網址和郵件資訊，請勿公開。
+- 選取先前匯出的 JSON，查看取代前預覽。只有按「確認取代全部設定」才會保存；**檔案中沒有的主機會移除**。若要保留目前設定，可先按「匯出設定」。
+- 只有相同 IP／Agent 連接埠，或相同 SMTP 主機／連接埠／TLS 模式／登入帳號，才保留本機對應憑證。預覽會列出待補填項目：缺少 Token 的 Agent 和相依的 Docker 監控暫停，請在主機設定重新輸入 Token、啟用 Agent，並按下方 Docker 說明重新啟用 Docker；缺少 SMTP 密碼時，在「郵件通知」補填並重新啟用。匯入不會寄測試信。
+- 首次成功匯入後，改用資料目錄的 **`configuration.json`** 保存全部設定。舊 `hosts.json`、`settings.json`、`notifications.json` 不會被更新；若新檔有問題，程式不會自動退回舊檔。包含密碼的完整備份應在管理端停止後，備份整個受保護的 `data` 目錄。不可用舊版開啟曾成功匯入的資料目錄，也不要把有憑證的檔案上傳或放進安裝檔。
 
 ## Windows 安裝版（獨立視窗＋系統匣）
 
 支援 Windows 10／11 x64，目標電腦不需 Python 或 Docker，但需 Microsoft Edge WebView2 Runtime（多數電腦已內建；缺少時請從 https://developer.microsoft.com/microsoft-edge/webview2/ 安裝 Evergreen Runtime）。不會自動下載或要求管理員權限，也不會改用舊版 IE 引擎。安裝檔為
-`dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
+`dist/installer/NetwordMonitor-Setup-1.4.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
 
 - 安裝僅供目前使用者，不需管理員權限。安裝目錄為 `%LOCALAPPDATA%\Programs\NetwordMonitor`。
 - 啟動後自動開始監控並開啟獨立 WebView2 桌面視窗，不另開瀏覽器分頁。右下系統匣可開啟介面、啟動／停止監控、開啟資料／日誌資料夾及離開。圖示可能位於隱藏圖示區；按視窗 X 會隱藏至系統匣並繼續監控，從系統匣選「離開」才會結束程式。
@@ -56,7 +63,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 
 1. 備份專案 `data`，在 `E:\netword-monitor` 執行 `docker compose down`，保留原始設定。
 2. 安裝並啟動 Windows 版一次，從系統匣選「離開」，確認背景管理端已停止。
-3. 將原 `data/hosts.json`、`data/notifications.json` 與 `data/settings.json`（後兩者若有）複製到 `%LOCALAPPDATA%\NetwordMonitor\data`。檔案含明文 Token／SMTP 密碼，請勿以郵件或 Git 傳送。
+3. 先備份來源與目的地的完整資料目錄。若原部署已使用 `data/configuration.json`，複製此檔至 `%LOCALAPPDATA%\NetwordMonitor\data`，並使用支援匯入的新版本。否則複製來源的 `hosts.json`、`notifications.json`、`settings.json`（以實際存在者為準）至乾淨的目的地資料目錄，避免以前的 `configuration.json` 或其他舊檔掩蓋來源設定。檔案含明文 Token／SMTP 密碼，請勿以郵件或 Git 傳送。
 4. 重新開啟 Windows 版，驗證主機、Agent 與通知。不要讓兩個管理端同時使用同一份設定。
 
 升級前先從系統匣離開；重新安裝即可更新程式。要回復 Docker，先離開 Windows 版，再於專案目錄執行 `docker compose up -d`；兩邊設定各自獨立，若有修改，須在都停止時自行同步。
@@ -68,7 +75,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Iscc "C:\Path\To\ISCC.exe"
 # 僅測試安裝包，使用臨時資料與隨機連接埠，不觸碰正式設定：
-python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe
+python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.4.0-x64.exe
 # 已有正式桌面安裝時不覆寫其登錄，改驗證可攜式後端：
 python tests/windows_package_smoke.py --exe dist/NetwordMonitor/NetwordMonitor.exe
 # 真實 WebView2／系統匣介面測試，同樣使用臨時資料與隨機連接埠：
@@ -149,7 +156,7 @@ TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正�
 
    不要讀取或傳回 Token；省略 `agent_token` 就會保留。
 
-   **Windows 安裝版：**不要執行上面的 API 範例，桌面版有獨立工作階段路徑。從系統匣選「離開」停止桌面管理端（按視窗 X 不會停止）。在同一個受保護的 `%LOCALAPPDATA%\NetwordMonitor\data` 目錄備份 `hosts.json`，用本機編輯器以 UTF-8（無 BOM）編輯原檔；只在對應 `ip` 的既有主機物件內新增或更新 `docker_monitor_enabled`、`website_monitor_enabled` 為 JSON 布林值 `true` 或 `false`。Docker 旗標為 `true` 時須保留 `agent_enabled: true`。不要更動其他欄位或複製、列印檔內 Token。儲存後重新啟動桌面版；若無法啟動，先退出桌面版並在原路徑還原備份。
+   **Windows 安裝版：**不要執行上面的 API 範例，桌面版有獨立工作階段路徑。從系統匣選「離開」停止桌面管理端（按視窗 X 不會停止），備份受保護的 `%LOCALAPPDATA%\NetwordMonitor\data`。若有 `configuration.json`，編輯該檔的 `hosts` 清單；否則編輯 `hosts.json`。使用 UTF-8（無 BOM），只在對應 IP 的主機物件內新增或更新 `docker_monitor_enabled`、`website_monitor_enabled` 為 JSON 布林值；Docker 旗標為 `true` 時須保留 `"agent_enabled": true`。不要改其他欄位或列印 Token。儲存後重新啟動；若無法啟動，退出桌面版再還原備份。
 
    **回復：**先用各版本上述方式關閉相應旗標，再還原原 Agent 參數、重新載入並只重啟 Agent。停用 Agent 前須先或同時關閉 Docker 旗標。
 5. 在戰情卡片與主機詳情確認兩項結果。已啟用 Gmail 通知時，Docker 與網站會各自計算異常和恢復；不必停掉正式服務來驗證。
@@ -176,7 +183,7 @@ TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正�
 - 單次寄送期限 20 秒，socket 閒置逾時 5 秒。若 DNS／底層呼叫未能及時退出，顯示結果未確定，等待原工作結束而不持續新增執行緒。
 - SMTP 接受郵件不保證收件匣送達。部分收件人拒收或傳送途中斷線、無法確認 SMTP 是否接受時，不自動重寄以避免重複；畫面會顯示警告。恢復信會註明先前接受結果不確定的情況。
 - 佇列最多 256 封；壅塞時顯示警告並延後排入，保留尚未排入的恢復狀態，可能合併壅塞期間的反覆異常。此功能不是保證投遞的長期事件紀錄。
-- 設定保存在 `data/notifications.json`，密碼只供寫入，API 不回傳。留空保留原密碼，明確勾選清除才刪除。檔案含明文 SMTP 密碼，須像 `hosts.json` 一樣保護檔案、目錄與備份 ACL，禁止提交 Git 或打包進映像。
+- 通知設定保存在 `data/notifications.json`，曾成功匯入則使用 `data/configuration.json`。密碼只供寫入，API 不回傳。一般編輯留空保留原密碼，明確勾選清除才刪除。檔案含明文 SMTP 密碼，請保護檔案、目錄與備份 ACL，禁止提交 Git 或打包進映像。
 - 事件去重與待寄佇列在記憶體中，重啟後重新累積；修改通知設定或主機連線設定會取消舊的待寄事件。停用無法撤回已交給 SMTP 的郵件。這是主機／服務狀態通知，未新增 CPU／磁碟使用率門檻告警。
 
 ## 選用：在被監控主機安裝代理程式
@@ -239,13 +246,13 @@ Agent 在首次通過認證的指標請求後啟動單一背景收集工作，�
 - 管理介面無使用者登入，刻意只綁定 `127.0.0.1` 並驗證 Host／Origin；不直接提供區網遠端管理。遠端管理請使用 SSH tunnel 等安全方式，不要直接對外轉發管理連接埠。
 - 代理程式使用 Bearer token，至少 24 個字元。**目前代理程式使用 HTTP，token 與指標在網路上不加密**。僅限可信隔離管理網路／VPN；不適用不可信網段，不要暴露至網際網路。
 - 主機防火牆只開放 **管理端 IP → 代理程式 TCP 9105**，不要對所有來源開放；只為需要監控的服務開放必要規則。
-- `data/hosts.json` 包含明文代理程式 token，請保護檔案與備份權限（Windows 請設定 ACL）。儲存使用建立時即限制為 `0600` 的唯一暫存檔，再原子替換。API 不會回傳 token；編輯時未填 token 會保留原值。
+- `data/hosts.json` 或匯入後的 `data/configuration.json` 包含明文 Agent Token，請保護檔案與備份權限（Windows 請設定 ACL）。儲存使用唯一私密暫存檔，再原子替換。API 不會回傳 Token；一般編輯未填 Token 會保留原值。
 - 管理端最多同時處理 32 個連線，每個請求設有 10 秒總期限，避免慢速標頭或本文持續佔用執行緒。
 - 本版支援 SMTP 郵件通知，但不含登入權限、TLS 終止、長期歷史儲存、排程安裝／開機自啟。正式環境應再補足維運需求；不要將它視為 Zabbix 的完整替代。
 
 ## 資料與限制
 
-- 主機設定儲存在 `data/hosts.json`，重啟後保留。
+- 主機設定重啟後保留；匯入後請備份現行 `data/configuration.json`，不要只備份舊檔。
 - 最近 120 次監控結果與掃描結果僅在記憶體中，重啟後清空。
 - 掃描會發現各類有回應裝置，並非僅限電腦。第一版不做反向 DNS／MAC／廠商查詢，主機名稱可自行設定。
 - 被防火牆阻擋 Ping 且未開放指定連接埠的主機可能被漏掉，可手動加入並設定正確服務或代理程式。
