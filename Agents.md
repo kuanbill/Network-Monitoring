@@ -23,6 +23,7 @@
 - `server.py`：Python 標準函式庫 HTTP 管理端、設定保存、背景監控、區網探索及 API。
 - `agent.py`：在被監控主機上執行，透過 psutil 提供 CPU、記憶體、磁碟、運行時間及指定系統服務狀態。
 - `notifications.py`：SMTP 設定驗證與安全原子保存、異常／恢復狀態機、單一背景寄信工作與有界佇列，僅 Python 標準函式庫。
+- `website_probe.py`：`.23`、`.44` 的固定 HTTPS 探測；只連已驗證的公開單播 IP，仍以原網域驗證憑證，不跳轉；每站一份在途工作、總期限 5 秒。
 - `requirements-agent.txt`：Agent 相依套件，psutil 版本範圍 `>=6,<8`。
 - `windows_app.py`：Windows 每使用者 WebView2 獨立視窗與系統匣，透過事件控制獨立管理子程序，固定回環 8080，不與 Docker 共用設定。Windows 使用 `SO_EXCLUSIVEADDRUSE` 避免重複綁定。視窗 X 隱藏至系統匣，離開才停止；需 WebView2 Runtime，明確拒絕 MSHTML 回退。桌面 API 使用每個控制器獨立隨機路徑，避免停止後舊頁面誤操作後來接手 8080 的 Docker；不是登入認證。
 - `packaging/`、`requirements-windows.txt`：PyInstaller／Inno Setup 安裝包、圖示、繁中訊息與授權收集腳本。輸出 `dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe`，不含正式機密；建置工具與輸出忽略 Git。
@@ -92,7 +93,11 @@ docker compose down
 
 主機設定包含 `id`、`name`、`ip`、`checks`、`agent_enabled`、`agent_port`；Token 只供寫入，公開回應僅提供是否已設定，不回傳內容。編輯時省略 `agent_token` 會保留既有值，空字串代表清除，前端不可混淆。
 
+`docker_monitor_enabled`、`website_monitor_enabled` 為主機設定的布林旗標，預設 `false`，更新省略時保留。只可對 `.23`（`urc.landagent.com.tw`）及 `.44`（`ai.tailan.com.tw`）啟用，Docker 另須啟用 Agent 並回報 `docker.service`。正式啟用與回復見 README；不透過 Docker socket、不提權、不自動重啟。
+
 最新狀態位於 `host.last`，包含 `status`、`timestamp`、`latency_ms`、`checks` 與 `agent`。Agent 成功時指標在 `last.agent.metrics`，包含 `hostname`、`os`、`cpu_percent`、`memory`、`disks`、`uptime_seconds`、`services`。
+
+`last.host_status` 用於泛用主機通知；獨立量測在 `last.docker`／`last.website`。`ok` 為 `true`、`false` 或 `null`（無資料）。獨立檢查可讓可達主機顯示 `degraded`，網站回應不能當成主機可達證據。
 
 - `up`：有可達證據，且設定的檢查無失敗。
 - `degraded`：主機可達，但部分檢查或 Agent／指定服務異常。
@@ -106,7 +111,7 @@ docker compose down
 ## 5. 戰情總覽介面
 
 - 預設卡片顯示所有符合篩選的主機：CPU、記憶體、磁碟最高使用率、服務摘要、回應時間、運行時間及最後檢查。
-- 服務僅包含使用者設定的 TCP／HTTP 檢查及 Agent `--services`，不是列舉作業系統所有服務。
+- 服務包含設定的 TCP／HTTP、Agent `--services` 和啟用的固定 Docker／網站監控，不是列舉作業系統所有服務。
 - 磁碟卡片顯示最高使用率與對應掛載點；完整磁碟清單在主機詳情。
 - 無 Agent 資料時顯示缺值，不可當成 0%；服務 `unknown` 與已確認失敗使用不同呈現。
 - 全螢幕總覽進入時清除搜尋與狀態篩選，以免漏掉正常主機。四台桌面 2×2 已驗證可在 1366×768 顯示。
@@ -181,7 +186,7 @@ Agent 程式修改不會自動更新遠端主機；需另行複製程式、更�
 - 2026-11-24 已更新五台 Agent 並重啟服務／排程，程式備份為各安裝目錄的 `agent.py.pre-fix-*`。已修正非 UTF-8 顯示文字、快照收集隔離、管理端指標必要欄位／範圍驗證及安全暫存保存；五台更新後均重新驗證正常，Token 與來源限制未變更。
 - 郵件通知支援 Gmail `smtp.gmail.com:587` STARTTLS 或 465 TLS，需兩步驟驗證與應用程式密碼，不支援 OAuth；不允許明文 SMTP，驗證 TLS 憑證。
 - 通知依每輪完成量測計數，預設連續異常 2 次／恢復 2 次；同一事件不重複通知。單一 FIFO 寄送工作、256 封佇列、寄送期限 20 秒，異常／恢復失敗最多 3 次、相隔 60 秒。部分拒收或 SMTP 接受結果不確定不自動重寄。壅塞保留待排入恢復，可能合併反覆異常，非保證投遞系統。
-- 去重與待寄佇列僅在記憶體，重啟或變更通知設定後重新累積；刪除／變更主機連線設定取消該主機舊事件。停用無法撤回已進入 SMTP 的郵件。勿在日誌／錯誤回應輸出 SMTP 原始例外，可能含密碼或郵件內容。
+- 去重與待寄佇列僅在記憶體；主機、Docker、網站依類型獨立去重。重啟或變更通知設定後重新累積；刪除主機取消全部舊事件，變更檢查或連線只取消受影響的事件。停用無法撤回已進入 SMTP 的郵件。勿在日誌／錯誤回應輸出 SMTP 原始例外，可能含密碼或郵件內容。
 - 目前沒有長期歷史資料庫、內建管理介面 TLS 或集中自動更新功能。
 
 ## 更新頻率功能開發紀錄（2026-11-24）
