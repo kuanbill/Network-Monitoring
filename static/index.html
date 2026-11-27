@@ -25,12 +25,13 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14l-1 7Z"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--surface)"/><circle cx="15" cy="12" r="2" fill="var(--surface)"/><circle cx="10" cy="18" r="2" fill="var(--surface)"/></symbol>
   </svg>
 
   <aside class="sidebar">
     <a class="brand" href="./" aria-label="LANscope 首頁"><span class="brand-mark"><svg class="icon"><use href="#i-pulse"/></svg></span><span>LAN<span class="brand-light">scope</span><small>NETWORK MONITOR</small></span></a>
     <div class="nav-label">工作空間</div>
-    <nav aria-label="主要導覽"><a class="nav-item active" href="#overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>監測總覽<span class="nav-count" id="nav-count">0</span></a><button class="nav-item" id="nav-scan"><svg class="icon"><use href="#i-scan"/></svg>探索區域網路</button><button class="nav-item" id="nav-notifications" aria-label="郵件通知設定"><svg class="icon"><use href="#i-alert"/></svg>郵件通知</button></nav>
+    <nav aria-label="主要導覽"><a class="nav-item active" href="#overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>監測總覽<span class="nav-count" id="nav-count">0</span></a><button class="nav-item" id="nav-scan"><svg class="icon"><use href="#i-scan"/></svg>探索區域網路</button><button class="nav-item" id="nav-notifications" aria-label="郵件通知設定"><svg class="icon"><use href="#i-alert"/></svg>郵件通知</button><button type="button" class="nav-item" id="nav-settings" aria-haspopup="dialog" title="設定"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>設定</button></nav>
     <div class="sidebar-bottom"><span class="local-dot"></span><div>私有網路・集中監測<small id="app-version">版本 v1.3.0</small></div></div>
   </aside>
 
@@ -52,7 +53,7 @@
         <div id="host-board" class="host-board" aria-label="所有主機指標總覽"></div>
         <div class="table-scroll" id="host-table-view" hidden><table class="host-table"><thead><tr><th scope="col">主機 / IP 位址</th><th scope="col">目前狀態</th><th scope="col">回應時間</th><th scope="col">近期紀錄</th><th scope="col">最後檢查</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="host-rows"></tbody></table></div>
         <div class="empty-state" id="host-empty"><span class="empty-icon"><svg class="icon"><use href="#i-server"/></svg></span><h3 id="empty-title">準備好，看見你的網路</h3><p id="empty-description">探索區域網路中的裝置，或手動加入第一台主機。</p><button class="button secondary" id="empty-add">新增第一台主機</button></div>
-        <div class="panel-footer"><span><span class="tiny-dot up"></span><span id="refresh-interval-label">每 5 秒同步畫面</span> <span class="footer-divider">/</span> <span id="interval-label">等待監測設定</span></span><button type="button" class="button quiet" id="open-settings">更新頻率設定</button><span id="last-sync">尚未同步</span></div>
+        <div class="panel-footer"><span><span class="tiny-dot up"></span><span id="refresh-interval-label">每 5 秒同步畫面</span> <span class="footer-divider">/</span> <span id="interval-label">等待監測設定</span></span><span id="last-sync">尚未同步</span></div>
       </section>
       <p class="network-note"><svg class="icon"><use href="#i-alert"/></svg>裝置可能封鎖 ICMP（Ping）；無回應不一定代表離線，建議搭配 TCP / HTTP 服務檢查。</p>
       <footer class="page-footer"><span>LANscope <span class="muted">/ 區域網路的即時視角</span></span><span class="mono">LOCAL NETWORK MONITOR</span></footer>
@@ -77,20 +78,32 @@
   </dialog>
 
   <dialog id="settings-dialog" class="modal" aria-labelledby="settings-title">
-    <form id="settings-form">
-      <div class="modal-header"><div><div class="eyebrow">UPDATE FREQUENCY</div><h2 id="settings-title">更新頻率設定</h2><p>儲存後立即套用，重新啟動仍保留。</p></div><button type="button" class="icon-button" data-close="settings-dialog" aria-label="關閉">×</button></div>
-      <div class="modal-body form-stack">
+    <div class="modal-header"><h2 id="settings-title" tabindex="-1">設定</h2><button type="button" class="icon-button" id="close-settings" data-close="settings-dialog" aria-label="關閉設定"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <div class="modal-body form-stack">
+      <form id="settings-form" class="form-stack" aria-labelledby="frequency-title">
+        <h3 id="frequency-title">更新頻率</h3>
         <fieldset id="settings-fields" class="form-stack" disabled>
           <label>畫面同步間隔（秒）<input id="refresh-interval" type="number" min="1" max="3600" step="1" required><span class="field-help">1–3600 秒，預設 5 秒。只更新畫面，不代表重新量測。</span></label>
           <label>背景監測間隔（秒）<input id="monitor-interval" type="number" min="5" max="3600" step="1" required><span class="field-help">5–3600 秒，預設 30 秒。每輪量測完成後等待此秒數；調整後會安排新一輪檢查。</span></label>
           <p class="field-help">此設定由管理端共用，會影響所有連線畫面。間隔越短，網路與主機負載越高；監測間隔也會影響異常通知的確認時間。不會變更 Agent 自身的指標收集頻率。</p>
         </fieldset>
-        <button type="button" class="button secondary" id="export-config">匯出整套設定</button>
-        <p class="field-help">JSON 檔不包含 Agent Token 或 SMTP 密碼，仍含主機與通知資訊，請妥善保存。</p>
         <div id="settings-error" class="error-banner" role="alert" hidden></div>
-      </div>
-      <div class="modal-footer"><button type="button" class="button secondary" data-close="settings-dialog">取消</button><button type="submit" class="button primary" id="save-settings" disabled>儲存設定</button></div>
-    </form>
+        <div><button type="submit" class="button primary" id="save-settings" disabled>儲存更新頻率</button></div>
+      </form>
+      <section class="form-stack config-transfer" aria-labelledby="config-transfer-title">
+        <h3 id="config-transfer-title">匯出與匯入</h3>
+        <p class="config-help" id="import-help">匯入會整批取代主機、更新頻率和郵件設定。JSON 不含 Agent Token 或 SMTP 密碼，但請妥善保存內部主機和郵件資訊。</p>
+        <div><button type="button" class="button secondary" id="export-config">匯出設定</button></div>
+        <label for="import-config-file">匯入設定（JSON）<input type="file" id="import-config-file" accept=".json,application/json" aria-describedby="import-help import-error"></label>
+        <p id="import-status" class="config-help" role="status"></p>
+        <div id="import-error" class="error-banner" role="alert" hidden></div>
+        <section id="import-preview" class="form-stack import-preview" aria-labelledby="import-preview-title" hidden>
+          <h4 id="import-preview-title" tabindex="-1">取代前預覽</h4>
+          <div id="import-summary"></div>
+          <div class="import-actions"><button type="button" class="button secondary" id="cancel-import">取消匯入</button><button type="button" class="button primary" id="apply-import">確認取代全部設定</button></div>
+        </section>
+      </section>
+    </div>
   </dialog>
 
   <dialog id="notification-dialog" class="modal" aria-labelledby="notification-title">

@@ -10,7 +10,8 @@
     adding: false, scan: { running: false, progress: 0, total: 0, results: [] },
     selected: new Set(), scanSignature: null, scanTimer: null, addFailures: '',
     notificationBusy: false, notificationLoaded: false, notificationTimer: null,
-    refreshInterval: 5, stateTimer: null, settingsBusy: false, settingsLoaded: false
+    refreshInterval: 5, stateTimer: null, settingsBusy: false, settingsLoaded: false,
+    importSerial: 0, importToken: null, importApplying: false
   };
 
   // All API data enters the DOM as text or DOM properties, never HTML.
@@ -52,13 +53,17 @@
       const options = { method, signal: controller.signal, headers: { Accept: 'application/json' }, cache: 'no-store' };
       if (body !== undefined) {
         options.headers['Content-Type'] = 'application/json';
-        options.body = JSON.stringify(body);
+        options.body = body instanceof File ? body : JSON.stringify(body);
       }
       const response = await fetch(path, options);
       const raw = await response.text();
       let data;
       try { data = raw ? JSON.parse(raw) : null; } catch { data = null; }
-      if (!response.ok) throw new Error(data?.error || `請求失敗（HTTP ${response.status}）`);
+      if (!response.ok) {
+        const error = new Error(data?.error || `請求失敗（HTTP ${response.status}）`);
+        error.status = response.status;
+        throw error;
+      }
       if (method === 'GET' && (!data || typeof data !== 'object')) throw new Error('服務回傳的資料格式不正確');
       return data;
     } catch (error) {
@@ -863,29 +868,81 @@
   }
   function settingsBusy(busy) {
     model.settingsBusy = busy;
-    $('settings-fields').disabled = busy || !model.settingsLoaded;
-    $('save-settings').disabled = busy || !model.settingsLoaded;
+    $('settings-fields').disabled = busy || model.importApplying || !model.settingsLoaded;
+    $('save-settings').disabled = $('settings-fields').disabled;
+    $('apply-import').disabled = busy || model.importApplying || !model.importToken;
   }
-  $('open-settings').addEventListener('click', async () => {
+
+  function fillFrequency(settings) {
+    $('refresh-interval').value = settings.refresh_interval;
+    $('monitor-interval').value = settings.monitor_interval;
+    applySettings(settings);
+    model.settingsLoaded = true;
+  }
+
+  function resetImport() {
+    model.importSerial++;
+    model.importToken = null;
+    const input = $('import-config-file');
+    input.value = '';
+    input.removeAttribute('aria-invalid');
+    $('import-preview').hidden = true;
+    $('import-summary').replaceChildren();
+    $('apply-import').disabled = true;
+    $('import-status').textContent = '';
+    showError('import-error', '');
+  }
+
+  function renderImport(data) {
+    const { hosts, notifications, settings } = data;
+    const summary = $('import-summary');
+    summary.append(el('p', '', `新增 ${hosts.added} 台、更新 ${hosts.updated} 台、移除 ${hosts.removed} 台、不變 ${hosts.unchanged} 台`));
+    if (!hosts.added && !hosts.updated && !hosts.unchanged) {
+      summary.append(el('p', 'error-banner', '這個檔案的主機清單是空的。匯入後會清空目前的主機清單。'));
+    }
+    if (hosts.removed_hosts.length) {
+      const details = el('details');
+      details.append(el('summary', '', '查看將移除的主機'));
+      const list = el('ul');
+      hosts.removed_hosts.forEach(({ name, ip }) => list.append(el('li', '', `${name}（${ip}）`)));
+      details.append(list);
+      summary.append(details);
+    }
+    summary.append(el('p', '', `畫面同步：${settings.refresh_interval} 秒；背景監測：${settings.monitor_interval} 秒。`),
+      el('p', '', `郵件通知：${notifications.enabled ? '啟用' : '停用'}。SMTP ${notifications.target_changed ? '改為' : '維持'} ${notifications.smtp_host}:${notifications.smtp_port}（${notifications.security === 'ssl' ? 'TLS' : 'STARTTLS'}）。`),
+      el('p', '', `收件人${notifications.recipients_changed ? '改為' : '維持'}：${notifications.recipients.join('、') || '未設定'}。`));
+    if (data.agent_credentials_needed.length) {
+      summary.append(el('p', '', '以下主機缺少符合的 Agent Token。匯入後請在主機編輯中重新輸入 Token 並啟用 Agent：'));
+      const list = el('ul');
+      data.agent_credentials_needed.forEach(({ name, ip, docker_was_enabled }) => {
+        list.append(el('li', '', `${name}（${ip}）${docker_was_enabled ? '：也需重新啟用 Docker 監控' : ''}`));
+      });
+      summary.append(list);
+    }
+    if (data.smtp_password_needed) summary.append(el('p', '', '郵件通知將暫停；請在「郵件通知」重新輸入 SMTP 密碼並啟用。'));
+    model.importToken = data.confirmation_token;
+    $('import-preview').hidden = false;
+    $('apply-import').disabled = model.settingsBusy;
+    $('import-preview-title').focus();
+  }
+
+  $('nav-settings').addEventListener('click', async () => {
     if (model.settingsBusy) return;
+    resetImport();
     model.settingsLoaded = false;
     settingsBusy(true);
     $('settings-form').reset();
     showError('settings-error', '');
     $('settings-dialog').showModal();
+    $('settings-title').focus();
     try {
-      const data = await api('/api/settings');
-      $('refresh-interval').value = data.refresh_interval;
-      $('monitor-interval').value = data.monitor_interval;
-      applySettings(data);
-      model.settingsLoaded = true;
+      fillFrequency(await api('/api/settings'));
     } catch (error) { showError('settings-error', error.message); }
     finally { settingsBusy(false); }
   });
   $('export-config').addEventListener('click', async () => {
     const button = $('export-config');
     button.disabled = true;
-    showError('settings-error', '');
     try {
       const config = await api('/api/config/export');
       const file = new Blob([JSON.stringify(config, null, 2) + '\n'], { type: 'application/json' });
@@ -895,12 +952,63 @@
       link.download = 'netword-settings.json';
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) { showError('settings-error', error.message); }
+    } catch (error) { if ($('settings-dialog').open) showError('import-error', error.message); }
     finally { button.disabled = false; }
+  });
+  $('import-config-file').addEventListener('change', async (event) => {
+    const input = event.currentTarget;
+    const [file] = input.files;
+    resetImport();
+    if (!file || model.importApplying) return;
+    const serial = model.importSerial;
+    $('import-status').textContent = '正在驗證設定檔…';
+    try {
+      if (file.size > 40 * 1024 * 1024) throw new Error('設定檔不可超過 40 MiB');
+      const data = await api('/api/config/import/preview', 'POST', file);
+      if (serial !== model.importSerial || !$('settings-dialog').open) return;
+      $('import-status').textContent = '驗證完成，尚未變更設定。';
+      renderImport(data);
+    } catch (error) {
+      if (serial !== model.importSerial || !$('settings-dialog').open) return;
+      $('import-status').textContent = '';
+      input.setAttribute('aria-invalid', 'true');
+      showError('import-error', error.message);
+    }
+  });
+  $('cancel-import').addEventListener('click', () => {
+    resetImport();
+    $('import-status').textContent = '已取消，設定未變更。';
+    $('import-config-file').focus();
+  });
+  $('apply-import').addEventListener('click', async () => {
+    if (!model.importToken || model.importApplying || model.settingsBusy) return;
+    model.importApplying = true;
+    const input = $('import-config-file');
+    input.disabled = $('cancel-import').disabled = $('close-settings').disabled = true;
+    settingsBusy(false);
+    showError('import-error', '');
+    $('import-status').textContent = '正在取代設定…';
+    try {
+      const result = await api('/api/config/import/apply', 'POST', { confirmation_token: model.importToken });
+      resetImport();
+      fillFrequency(result.settings);
+      showError('settings-error', '');
+      $('import-status').textContent = '已匯入並取代全部設定。';
+      void loadState();
+    } catch (error) {
+      if (error.status === 409) resetImport();
+      $('import-status').textContent = '';
+      showError('import-error', error.message);
+    } finally {
+      model.importApplying = false;
+      input.disabled = $('cancel-import').disabled = $('close-settings').disabled = false;
+      settingsBusy(false);
+      (model.importToken ? $('apply-import') : input).focus();
+    }
   });
   $('settings-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (model.settingsBusy || !model.settingsLoaded) return;
+    if (model.settingsBusy || model.importApplying || !model.settingsLoaded) return;
     settingsBusy(true);
     showError('settings-error', '');
     try {
@@ -915,7 +1023,12 @@
     } catch (error) { showError('settings-error', error.message); }
     finally { settingsBusy(false); }
   });
-  $('settings-dialog').addEventListener('cancel', (event) => { if (model.settingsBusy) event.preventDefault(); });
+  $('settings-dialog').addEventListener('cancel', (event) => { if (model.settingsBusy || model.importApplying) event.preventDefault(); });
+  $('settings-dialog').addEventListener('close', () => {
+    if ($('settings-dialog').open) return;
+    resetImport();
+    $('nav-settings').focus();
+  });
   $('nav-notifications').addEventListener('click', openNotifications);
   $('notification-form').addEventListener('submit', saveNotifications);
   $('gmail-preset').addEventListener('click', () => {
@@ -940,7 +1053,7 @@
   document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => {
     if (button.dataset.close === 'host-dialog' && model.formPending) return;
     if (button.dataset.close === 'notification-dialog' && model.notificationBusy) return;
-    if (button.dataset.close === 'settings-dialog' && model.settingsBusy) return;
+    if (button.dataset.close === 'settings-dialog' && (model.settingsBusy || model.importApplying)) return;
     $(button.dataset.close).close();
   }));
   $('host-dialog').addEventListener('cancel', (event) => { if (model.formPending) event.preventDefault(); });

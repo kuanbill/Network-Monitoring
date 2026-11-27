@@ -32,7 +32,7 @@ $BundledHtml = $BundledHtml -replace $VersionPattern, ('${1}' + $Version + '${2}
 [IO.File]::WriteAllText($BundledHtmlPath, $BundledHtml, [Text.UTF8Encoding]::new($false))
 # Fail closed if the distributable ever gains private runtime files.
 $Forbidden = Get-ChildItem "dist\NetwordMonitor" -Recurse -File | Where-Object {
-    $_.Name -in @("hosts.json", "notifications.json", "agent.env") -or
+    $_.Name -in @("hosts.json", "settings.json", "notifications.json", "configuration.json", "agent.env") -or
     $_.Name -like "*.env" -or $_.Name -like "hosts.pre-*"
 }
 if ($Forbidden) { throw "Private runtime files found in distributable" }
