@@ -2,5 +2,6 @@
 !Dockerfile
 !server.py
 !notifications.py
+!website_probe.py
 !static/
 !static/**
