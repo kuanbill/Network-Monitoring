@@ -33,7 +33,7 @@ class DeliveryUncertain(Exception):
     """The connection failed during DATA; SMTP may already have accepted it."""
 
 
-def validate_settings(data, previous=None, complete=False):
+def validate_settings(data, previous=None, complete=False, *, allow_missing_password=False):
     if not isinstance(data, dict):
         raise ValueError('通知設定須為 JSON 物件')
     settings = copy.deepcopy(DEFAULTS if previous is None else previous)
@@ -75,7 +75,7 @@ def validate_settings(data, previous=None, complete=False):
             raise ValueError('請設定寄件人及至少一位收件人')
         if settings['smtp_host'].lower() == 'smtp.gmail.com' and not settings['username']:
             raise ValueError('Gmail 請設定完整登入 Email 及應用程式密碼')
-        if settings['username'] and not settings['password']:
+        if settings['username'] and not settings['password'] and not allow_missing_password:
             raise ValueError('SMTP 登入帳號需要密碼；Gmail 請使用應用程式密碼')
     return settings
 

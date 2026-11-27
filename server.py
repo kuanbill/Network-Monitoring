@@ -80,7 +80,7 @@ def scan_addresses(value):
         raise ValueError('掃描範圍須為私有 IPv4，最多 1024 個位址（例如 192.168.1.0/24）')
 
 
-def validate_host(data, previous=None):
+def validate_host(data, previous=None, *, allow_missing_token=False):
     if not isinstance(data, dict):
         raise ValueError('主機設定須為 JSON 物件')
     ip = valid_ip(data.get('ip'))
@@ -114,7 +114,7 @@ def validate_host(data, previous=None):
     enabled = data.get('agent_enabled', False)
     if not isinstance(enabled, bool):
         raise ValueError('agent_enabled 須為布林值')
-    if enabled and len(token) < 24:
+    if enabled and len(token) < 24 and not allow_missing_token:
         raise ValueError('啟用代理程式須提供至少 24 字元的 token')
     flags = {}
     for key in ('docker_monitor_enabled', 'website_monitor_enabled'):
