@@ -17,12 +17,32 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
 from notifications import NotificationManager
+from website_probe import WEBSITE_DOMAINS, probe_website
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8')]
 TIMEOUT = 1.5
 MAX_CLIENTS = 32
 REQUEST_DEADLINE = 10
+DOCKER_UNIT = 'docker.service'
+DOCKER_DETAILS = {
+    'active': 'systemd 回報 Docker 服務運行中',
+    'inactive': 'Docker 服務未運行',
+    'failed': 'Docker 服務回報失敗',
+    'activating': 'Docker 服務正在啟動，尚未確認正常',
+    'deactivating': 'Docker 服務正在停止',
+    'reloading': 'Docker 服務正在重新載入',
+    'maintenance': 'Docker 服務處於維護狀態',
+    'unknown': '無法確認 Docker 服務狀態，請確認 Agent 已設定檢查 docker.service',
+    'agent_unavailable': 'Agent 無法提供資料，不能據此判定 Docker 服務狀態',
+}
+WEBSITE_DETAILS = {
+    'dns': 'DNS 查詢失敗或沒有可用的公開位址',
+    'certificate': 'HTTPS 憑證驗證失敗',
+    'connection': '無法取得 HTTPS 回應',
+    'timeout': '網站檢查逾時',
+    'busy': '無資料：前次網站檢查未結束',
+}
 
 
 def valid_ip(value):
@@ -97,6 +117,16 @@ def validate_host(data, previous=None):
         raise ValueError('agent_enabled 須為布林值')
     if enabled and len(token) < 24:
         raise ValueError('啟用代理程式須提供至少 24 字元的 token')
+    flags = {}
+    for key in ('docker_monitor_enabled', 'website_monitor_enabled'):
+        value = data.get(key, (previous or {}).get(key, False))
+        if not isinstance(value, bool):
+            raise ValueError(f'{key} 須為布林值')
+        if value and ip not in WEBSITE_DOMAINS:
+            raise ValueError('此主機不支援固定的 Docker 或網站監控')
+        flags[key] = value
+    if flags['docker_monitor_enabled'] and not enabled:
+        raise ValueError('Docker 監控需要 Agent；停用 Agent 前請先停用 Docker 監控')
     mac = data.get('mac_address', (previous or {}).get('mac_address', ''))
     if not isinstance(mac, str) or (mac and not re.fullmatch(r'[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}', mac)):
         raise ValueError('MAC 位址格式錯誤')
@@ -110,7 +140,7 @@ def validate_host(data, previous=None):
             check['url'].encode('utf-8')
     return {'id': (previous or {}).get('id', uuid.uuid4().hex), 'name': name.strip(), 'ip': ip,
             'checks': clean, 'agent_enabled': enabled, 'agent_port': port(data.get('agent_port', 9105)), 'agent_token': token,
-            'mac_address': mac}
+            'mac_address': mac, **flags}
 
 
 def ping(ip):
@@ -229,10 +259,29 @@ def inspect_host(host):
         except (OSError, ValueError, RecursionError, http.client.HTTPException) as exc:
             agent = {'ok': False, 'error': str(exc)[:250]}
     services = agent.get('metrics', {}).get('services', []) if agent else []
-    services_failed = isinstance(services, list) and any(isinstance(s, dict) and s.get('status') not in ('running', 'active') for s in services)
-    failed = any(not c['ok'] for c in results) or (agent is not None and not agent['ok']) or services_failed
-    status = ('degraded' if failed else 'up') if alive else 'down'
-    return {'timestamp': time.time(), 'status': status, 'latency_ms': latency, 'reachable': alive, 'checks': results, 'agent': agent}
+    checks = {}
+    if host.get('docker_monitor_enabled'):
+        units = [service for service in services if service['name'] == DOCKER_UNIT]
+        if agent and agent['ok']:
+            code = units[0]['status'] if len(units) == 1 else 'unknown'
+            if code == 'agent_unavailable' or code not in DOCKER_DETAILS:
+                code = 'unknown'
+            ok = code == 'active'
+        else:
+            code, ok = 'agent_unavailable', None
+        checks['docker'] = {'ok': ok, 'code': code, 'label': 'Docker 服務',
+                            'detail': DOCKER_DETAILS[code], 'latency_ms': None}
+        services = [service for service in services if service['name'] != DOCKER_UNIT]
+    services_failed = any(service['status'] not in ('running', 'active') for service in services)
+    host_failed = any(not c['ok'] for c in results) or (agent is not None and not agent['ok']) or services_failed
+    host_status = ('degraded' if host_failed else 'up') if alive else 'down'
+    if host.get('website_monitor_enabled'):
+        website = probe_website(host['ip'])
+        detail = f"HTTP {website['http_status']}" if website['code'] == 'http' else WEBSITE_DETAILS[website['code']]
+        checks['website'] = {**website, 'label': f"網站 {WEBSITE_DOMAINS[host['ip']]}", 'detail': detail}
+    status = 'degraded' if alive and any(check['ok'] is False for check in checks.values()) else host_status
+    return {'timestamp': time.time(), 'status': status, 'host_status': host_status,
+            'latency_ms': latency, 'reachable': alive, 'checks': results, 'agent': agent, **checks}
 
 
 def validate_settings(data, previous=None):

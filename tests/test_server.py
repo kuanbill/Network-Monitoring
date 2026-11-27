@@ -66,6 +66,60 @@ class ValidationTests(unittest.TestCase):
 
 
 class MonitorTests(unittest.TestCase):
+    @patch('server.ping', return_value=(True, 2))
+    def test_docker_status_and_host_status_are_independent(self, ping):
+        host = server.validate_host({'ip': '192.168.6.23', 'agent_enabled': True,
+                                     'agent_token': 'x' * 24, 'docker_monitor_enabled': True})
+        for unit, expected in (('active', True), ('inactive', False), ('failed', False),
+                               ('unknown', False), (None, False)):
+            with self.subTest(unit=unit):
+                metrics = valid_metrics()
+                metrics['services'] = [{'name': 'ssh', 'status': 'active'}]
+                if unit:
+                    metrics['services'].append({'name': 'docker.service', 'status': unit})
+                with patch('server.http_get', return_value=(200, json.dumps(metrics).encode())):
+                    result = server.inspect_host(host)
+                self.assertIs(result['docker']['ok'], expected)
+                self.assertEqual(result['docker']['code'], unit or 'unknown')
+                self.assertEqual(result['host_status'], 'up')
+                self.assertEqual(result['status'], 'up' if expected else 'degraded')
+                self.assertEqual(result['agent']['metrics']['services'], metrics['services'])
+                if unit in ('unknown', None):
+                    self.assertIn('無法確認', result['docker']['detail'])
+                    self.assertNotIn('已停止', result['docker']['detail'])
+        with patch('server.http_get', side_effect=TimeoutError):
+            result = server.inspect_host(host)
+        self.assertIsNone(result['docker']['ok'])
+        self.assertEqual(result['docker']['code'], 'agent_unavailable')
+        self.assertEqual(result['host_status'], 'degraded')
+
+        metrics['services'] = [{'name': 'ssh', 'status': 'active'}, {'name': 'docker.service', 'status': 'failed'}]
+        with patch('server.http_get', return_value=(200, json.dumps(metrics).encode())):
+            result = server.inspect_host(dict(host, docker_monitor_enabled=False))
+        self.assertNotIn('docker', result)
+        self.assertEqual(result['host_status'], 'degraded')
+        metrics['services'][0]['status'] = 'failed'
+        with patch('server.http_get', return_value=(200, json.dumps(metrics).encode())):
+            self.assertEqual(server.inspect_host(host)['host_status'], 'degraded')
+
+    def test_external_website_does_not_prove_host_reachability(self):
+        host = server.validate_host({'ip': '192.168.6.44', 'website_monitor_enabled': True})
+        for ping_state, sample, expected in (
+            ((False, None), {'code': 'http', 'http_status': 200, 'ok': True, 'latency_ms': 19.0}, 'down'),
+            ((True, 2), {'code': 'http', 'http_status': 503, 'ok': False, 'latency_ms': 19.0}, 'degraded'),
+            ((True, 2), {'code': 'busy', 'ok': None, 'latency_ms': None}, 'up'),
+        ):
+            with self.subTest(sample=sample), patch('server.ping', return_value=ping_state), \
+                    patch('server.probe_website', return_value=sample) as probe:
+                result = server.inspect_host(host)
+                probe.assert_called_once_with('192.168.6.44')
+                self.assertEqual(result['status'], expected)
+                self.assertEqual(result['host_status'], 'up' if ping_state[0] else 'down')
+                self.assertIs(result['reachable'], ping_state[0])
+                self.assertEqual(result['latency_ms'], ping_state[1])
+                self.assertIs(result['website']['ok'], sample['ok'])
+                self.assertIn('ai.tailan.com.tw', result['website']['label'])
+
     def test_wake_packet_and_cooldown(self):
         from unittest.mock import patch
 
@@ -303,6 +357,41 @@ class HTTPProbeTests(unittest.TestCase):
 
 
 class APITests(unittest.TestCase):
+    def test_fixed_flags_validation_persistence_and_export(self):
+        flags = {'docker_monitor_enabled': True, 'website_monitor_enabled': True}
+        for flag in flags:
+            self.assertIs(server.validate_host({'ip': '192.168.6.23'})[flag], False)
+            for ip, value in (('192.168.6.23', 1), ('192.168.6.212', True)):
+                with self.subTest(flag=flag, ip=ip), self.assertRaises(ValueError):
+                    server.validate_host({'ip': ip, flag: value, 'agent_enabled': True, 'agent_token': 'x' * 24})
+        with self.assertRaises(ValueError):
+            server.validate_host({'ip': '192.168.6.44', 'docker_monitor_enabled': True})
+        with self.assertRaises(ValueError):
+            server.validate_host({'ip': '192.168.6.44', 'checks': [
+                {'type': 'http', 'url': 'https://ai.tailan.com.tw/'}]})
+        base = {'ip': '192.168.6.23', 'agent_enabled': True, 'checks': [{'type': 'tcp', 'port': 22}]}
+        status, created = self.request('POST', '/api/hosts', dict(base, agent_token='x' * 24, **flags))
+        self.assertEqual(status, 201)
+        path = '/api/hosts/' + created['id']
+        self.assertEqual(self.request('PUT', path, dict(base, name='新名稱'))[0], 200)
+        self.assertEqual(self.request('PUT', path, dict(base, agent_enabled=False))[0], 400)
+        for endpoint in ('/api/state', '/api/config/export'):
+            status, data = self.request('GET', endpoint)
+            self.assertEqual(status, 200)
+            for key in flags:
+                self.assertIs(data['hosts'][0][key], True)
+            self.assertNotIn('agent_token', data['hosts'][0])
+        file = self.server.monitor.path
+        reloaded = server.Monitor(file.parent)
+        self.addCleanup(reloaded.notifications.close)
+        self.assertTrue(reloaded.state()['hosts'][0]['agent_token_set'])
+        for key in flags:
+            self.assertIs(reloaded.state()['hosts'][0][key], True)
+        status, edited = self.request('PUT', path, dict(base, agent_enabled=False, docker_monitor_enabled=False))
+        self.assertEqual(status, 200)
+        self.assertIs(edited['docker_monitor_enabled'], False)
+        self.assertIs(edited['website_monitor_enabled'], True)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.server = server.Server(('127.0.0.1', 0), server.Handler)
