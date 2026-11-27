@@ -26,7 +26,7 @@
 - `website_probe.py`：`.23`、`.44` 的固定 HTTPS 探測；只連已驗證的公開單播 IP，仍以原網域驗證憑證，不跳轉；每站一份在途工作、總期限 5 秒。
 - `requirements-agent.txt`：Agent 相依套件，psutil 版本範圍 `>=6,<8`。
 - `windows_app.py`：Windows 每使用者 WebView2 獨立視窗與系統匣，透過事件控制獨立管理子程序，固定回環 8080，不與 Docker 共用設定。Windows 使用 `SO_EXCLUSIVEADDRUSE` 避免重複綁定。視窗 X 隱藏至系統匣，離開才停止；需 WebView2 Runtime，明確拒絕 MSHTML 回退。桌面 API 使用每個控制器獨立隨機路徑，避免停止後舊頁面誤操作後來接手 8080 的 Docker；不是登入認證。
-- `packaging/`、`requirements-windows.txt`：PyInstaller／Inno Setup 安裝包、圖示、繁中訊息與授權收集腳本。輸出 `dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe`，不含正式機密；建置工具與輸出忽略 Git。
+- `packaging/`、`requirements-windows.txt`：PyInstaller／Inno Setup 安裝包、圖示、繁中訊息與授權收集腳本。輸出 `dist/installer/NetwordMonitor-Setup-<版本>-x64.exe`，不含正式機密；建置工具與輸出忽略 Git。
 - Windows 設定位於 `%LOCALAPPDATA%\NetwordMonitor\data`，日誌位於 `logs`；安裝目錄為 `%LOCALAPPDATA%\Programs\NetwordMonitor`，解除安裝保留設定。尚未切換正式 Docker 或自動搬移設定；切換須先停止一方並遵循 README。
 - `static/index.html`：單頁介面與設定、探索、詳情對話框。
 - `static/app.js`：API 輪詢、畫面狀態、戰情卡片與表單操作，無前端框架或打包流程。
