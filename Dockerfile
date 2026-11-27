@@ -8,7 +8,7 @@ RUN apt-get update \
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY server.py notifications.py ./
+COPY server.py notifications.py website_probe.py ./
 COPY static/ ./static/
 RUN mkdir /app/data && chown netword:netword /app/data
 USER netword

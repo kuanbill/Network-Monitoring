@@ -11,8 +11,10 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 import urllib.request
 
+import server
 import windows_app as app
 
 
@@ -100,6 +102,39 @@ class DesktopTests(unittest.TestCase):
             self.assertFalse(controller.running())
             controller.stop()
         self.assertFalse((self.directory / 'data' / 'hosts.json').exists())
+
+    def test_desktop_loads_offline_monitor_flags_without_unscoped_api(self):
+        port = self.free_port()
+        session = 'offline-flags'
+        base = f'http://127.0.0.1:{port}'
+        stop, ready = app.NamedEvent(), app.NamedEvent()
+        # Equivalent to a local edit while the desktop backend is stopped.
+        saved = [{'ip': '192.168.6.23', 'agent_enabled': True, 'agent_token': 'x' * 24,
+                  'docker_monitor_enabled': True, 'website_monitor_enabled': True}]
+        (self.directory / 'data' / 'hosts.json').write_text(json.dumps(saved), encoding='utf-8')
+        with patch.object(server.Monitor, 'loop'), patch.object(app, 'configure_logging'):
+            backend = threading.Thread(target=app.run_backend,
+                                       args=(self.directory, stop.name, ready.name, port, 0, session),
+                                       daemon=True)
+            backend.start()
+            try:
+                self.assertTrue(ready.wait(3000))
+                with self.assertRaises(HTTPError) as denied:
+                    urllib.request.urlopen(base + '/api/state', timeout=2)
+                self.assertEqual(denied.exception.code, 404)
+                denied.exception.close()
+                with urllib.request.urlopen(f'{base}/__desktop__/{session}/api/state', timeout=2) as response:
+                    host = json.load(response)['hosts'][0]
+                self.assertTrue(host['docker_monitor_enabled'])
+                self.assertTrue(host['website_monitor_enabled'])
+                self.assertTrue(host['agent_token_set'])
+                self.assertNotIn('agent_token', host)
+            finally:
+                stop.set()
+                backend.join(4)
+                stop.close()
+                ready.close()
+            self.assertFalse(backend.is_alive())
 
     @unittest.skipUnless(importlib.util.find_spec('webview'), 'Install requirements-windows.txt for desktop test')
     def test_desktop_close_hides_and_tray_reopens_then_quits(self):

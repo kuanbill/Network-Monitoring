@@ -39,7 +39,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 ## Windows 安裝版（獨立視窗＋系統匣）
 
 支援 Windows 10／11 x64，目標電腦不需 Python 或 Docker，但需 Microsoft Edge WebView2 Runtime（多數電腦已內建；缺少時請從 https://developer.microsoft.com/microsoft-edge/webview2/ 安裝 Evergreen Runtime）。不會自動下載或要求管理員權限，也不會改用舊版 IE 引擎。安裝檔為
-`dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
+`dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe`；尚未數位簽章，Windows 可能提示發行者不明，請先核對來源與 SHA-256。
 
 - 安裝僅供目前使用者，不需管理員權限。安裝目錄為 `%LOCALAPPDATA%\Programs\NetwordMonitor`。
 - 啟動後自動開始監控並開啟獨立 WebView2 桌面視窗，不另開瀏覽器分頁。右下系統匣可開啟介面、啟動／停止監控、開啟資料／日誌資料夾及離開。圖示可能位於隱藏圖示區；按視窗 X 會隱藏至系統匣並繼續監控，從系統匣選「離開」才會結束程式。
@@ -68,7 +68,7 @@ python server.py --port 8088 --interval 30 --data-dir ./data
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Iscc "C:\Path\To\ISCC.exe"
 # 僅測試安裝包，使用臨時資料與隨機連接埠，不觸碰正式設定：
-python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.0.0-x64.exe
+python tests/windows_package_smoke.py --installer dist/installer/NetwordMonitor-Setup-1.3.0-x64.exe
 # 已有正式桌面安裝時不覆寫其登錄，改驗證可攜式後端：
 python tests/windows_package_smoke.py --exe dist/NetwordMonitor/NetwordMonitor.exe
 # 真實 WebView2／系統匣介面測試，同樣使用臨時資料與隨機連接埠：
@@ -107,16 +107,52 @@ docker compose logs --tail 50
 4. 網站可另設定 HTTP／HTTPS URL，例如 `http://192.168.1.10:8080/health`。URL 必須使用該主機的 IP。HTTPS 會驗證憑證，憑證須受管理端信任且包含該 IP。
 5. 預設「主機戰情總覽」以卡片並排顯示主機名稱、IP、系統、CPU、記憶體、磁碟最高使用率、已設定服務狀態、回應時間及運行時間。沒有 Agent 資料時顯示缺值，不會當成 0%。
 6. 點「全螢幕總覽」進入適合四台主機的桌面 2×2 戰情畫面（已驗證 1366×768）；進入時會清除篩選並顯示全部主機。可按 Esc 或「離開全螢幕」返回；瀏覽器不允許全螢幕時仍可使用專注模式。手機改為單欄，多主機或大量服務時仍可能需要捲動。
-7. 點主機名稱查看完整磁碟清單、檢查結果及最近 120 次狀態；「切換清單」可回到原本表格。服務僅包含已設定的 TCP／HTTP 檢查與 Agent `--services` 項目，並非列出作業系統的所有服務。
+7. 點主機名稱查看完整磁碟清單、檢查結果及最近 120 次狀態；「切換清單」可回到原本表格。服務清單只包含設定的檢查及 Agent `--services` 項目，並非列出作業系統的所有服務。
 
 ### 狀態判定
 
-- **正常 up**：ICMP、指定服務或代理程式至少一項有回應，且所有已設定檢查成功。
-- **異常 degraded**：主機有回應，但某個 TCP／HTTP／代理程式檢查失敗，或已指定的作業系統服務不是 running／active。
-- **無回應 down**：所有探測都未成功；不代表一定關機，防火牆也可能阻擋探測。
+- **正常 up**：有主機可達證據，且沒有檢查回報失敗；個別項目仍可能暫無資料。
+- **異常 degraded**：主機有回應，但有檢查回報失敗。
+- **無回應 down**：沒有取得主機可達證據；不代表一定關機，防火牆也可能阻擋探測。獨立網站回應不代表主機可達。
 - 尚未檢查的主機不顯示既有結果。
 
-TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正常；HTTP 200–399 視為成功，不自動跟隨重新導向。Ping 延遲是探測程序耗時的近似值，不是精確的 ICMP RTT；ICMP 不通時可能顯示成功 TCP／HTTP 檢查耗時。
+TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正常；使用主機 IP 的既有 HTTP 檢查接受 200–399，不自動跟隨重新導向。Ping 延遲是探測程序耗時的近似值，不是精確的 ICMP RTT；ICMP 不通時可能顯示成功 TCP／HTTP 檢查耗時。
+
+### 固定主機的 Docker 與網站監控
+
+| 主機 | Docker | 網站 |
+| --- | --- | --- |
+| `192.168.6.23` | `docker.service` | `https://urc.landagent.com.tw/` |
+| `192.168.6.44` | `docker.service` | `https://ai.tailan.com.tw/` |
+
+兩項預設關閉，可分別啟用。Docker 只讀取 systemd 狀態，不枚舉容器、不接觸 Docker socket，也不會自動重啟。Agent 失聯時 Docker 標為「無資料」，不誤報 Docker 停止。網站由管理端以固定網域檢查，只接受公開位址與有效的 HTTPS 憑證、5 秒內的 `2xx` 回應；不跟隨重新導向。這項檢查不驗證登入後的功能。
+
+**上線步驟（維護者）：**
+
+1. 在兩台 Linux 以 Agent 帳號確認 `systemctl show docker.service --property=LoadState,ActiveState` 回報系統層級單元已載入並運行。從實際管理端的網路環境確認上表網址透過公開位址正常回應 `2xx`；若只解析到非公開位址、網站固定回應重新導向，或 Docker 為 rootless／不同單元，先核對需求，不要放寬檢查。
+2. 若要啟用 Docker 檢查，備份兩台原本的 `~/.config/systemd/user/netword-agent.service`（依原權限保護），將其原有 `--services ssh` 擴充成 `--services ssh docker.service`。保留其餘啟動參數與環境設定，執行 `systemctl --user daemon-reload` 與 `systemctl --user restart netword-agent.service`。確認服務正常，且管理端的 Agent 指標包含 `ssh` 與 `docker.service`；不需更新 Agent 程式、加入 `docker` 群組或重啟 Docker。
+3. 在既有部署位置更新並重建管理端（Docker 使用 `docker compose up -d --build`）。不要啟動第二套共用資料的管理端。
+4. **Docker／原生管理端：**從同一管理端的本機 API 讀取設定，對正確的主機 ID 更新旗標。此版不提供網頁開關。以下範例啟用 `.23` 的兩項；對 `.44` 改 `$ip`，或按需要單獨設定一項。執行前請檢查主機、連接埠和權限。
+
+   ```powershell
+   $base = 'http://127.0.0.1:8080'
+   $ip = '192.168.6.23'
+   $target = (Invoke-RestMethod "$base/api/state").hosts | Where-Object { $_.ip -eq $ip }
+   if (-not $target) { throw "找不到 $ip" }
+   $payload = @{
+       ip = $target.ip; name = $target.name; checks = @($target.checks)
+       agent_enabled = $target.agent_enabled; agent_port = $target.agent_port
+       docker_monitor_enabled = $true; website_monitor_enabled = $true
+   } | ConvertTo-Json -Depth 8
+   Invoke-RestMethod "$base/api/hosts/$($target.id)" -Method Put -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
+   ```
+
+   不要讀取或傳回 Token；省略 `agent_token` 就會保留。
+
+   **Windows 安裝版：**不要執行上面的 API 範例，桌面版有獨立工作階段路徑。從系統匣選「離開」停止桌面管理端（按視窗 X 不會停止）。在同一個受保護的 `%LOCALAPPDATA%\NetwordMonitor\data` 目錄備份 `hosts.json`，用本機編輯器以 UTF-8（無 BOM）編輯原檔；只在對應 `ip` 的既有主機物件內新增或更新 `docker_monitor_enabled`、`website_monitor_enabled` 為 JSON 布林值 `true` 或 `false`。Docker 旗標為 `true` 時須保留 `agent_enabled: true`。不要更動其他欄位或複製、列印檔內 Token。儲存後重新啟動桌面版；若無法啟動，先退出桌面版並在原路徑還原備份。
+
+   **回復：**先用各版本上述方式關閉相應旗標，再還原原 Agent 參數、重新載入並只重啟 Agent。停用 Agent 前須先或同時關閉 Docker 旗標。
+5. 在戰情卡片與主機詳情確認兩項結果。已啟用 Gmail 通知時，Docker 與網站會各自計算異常和恢復；不必停掉正式服務來驗證。
 
 ## Email 異常通知（支援 Google Gmail）
 
@@ -135,6 +171,7 @@ TCP 成功只表示可建立連線，不保證資料庫等應用程式功能正�
 
 - 預設連續 **2 輪** `degraded`／`down` 才通知；連續 **2 輪** `up` 確認恢復，可選擇寄恢復信。次數可設為 1–10，依完成的主機量測計算，不是畫面同步次數。
 - 同一異常事件只通知一次，`degraded` 與 `down` 互換不重複通知；確認恢復後再次異常才建立新事件。郵件以繁體中文列出主機名稱、IP、檢查時間（管理端時區）、失敗項目、可能原因與建議處理方式，包含 TCP 連接埠、HTTP 狀態、Agent 與指定系統服務狀態。無法確認根本原因時會明確說明，不將連線失敗視為已確認關機；不包含 Agent Token、原始錯誤或 HTTP URL 私密查詢參數。
+- 啟用固定監控後，Docker、網站各自寄異常和恢復通知，不再因它們的單一故障額外寄泛用主機信。缺少資料會中斷該項的連續計數，不視為異常或恢復。
 - 郵件使用獨立背景工作及有上限的佇列，不會阻塞主機監測。每封異常／恢復通知最多嘗試 3 次，相隔至少 60 秒；測試信僅嘗試一次。使用 FIFO 保持事件順序，因此 SMTP 故障重試會延後後續郵件。
 - 單次寄送期限 20 秒，socket 閒置逾時 5 秒。若 DNS／底層呼叫未能及時退出，顯示結果未確定，等待原工作結束而不持續新增執行緒。
 - SMTP 接受郵件不保證收件匣送達。部分收件人拒收或傳送途中斷線、無法確認 SMTP 是否接受時，不自動重寄以避免重複；畫面會顯示警告。恢復信會註明先前接受結果不確定的情況。
