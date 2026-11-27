@@ -12,4 +12,5 @@
 @media(min-width:1000px) and (min-height:700px){.wall-mode .host-board{min-height:calc(100dvh - 200px);align-content:stretch;grid-auto-rows:1fr}.wall-mode .host-card{display:flex;flex-direction:column}.wall-mode .card-footer{margin-top:auto;padding-top:12px}.wall-mode .card-services{margin-bottom:12px}}
 @media(max-width:900px){.overview-actions{gap:2px}.overview-actions .button{font-size:11px;padding:8px}.host-board{padding:12px;gap:12px}.host-card{padding:12px}.card-metrics{gap:8px}.card-metric strong{font-size:24px}}
 @media(max-width:650px){.host-board{grid-template-columns:1fr}.card-heading .status-badge{font-size:10px}.overview-actions{justify-content:flex-start}.panel-heading:has(.overview-actions){align-items:flex-start;gap:10px;flex-wrap:wrap}.wall-mode main{padding:8px}}
+.check-status.check-unknown{color:var(--muted)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}

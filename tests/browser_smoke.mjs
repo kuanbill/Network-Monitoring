@@ -171,11 +171,43 @@ try {
   assert.equal(await evaluate(`document.body.classList.contains('wall-mode')`),false,'wall mode can be exited');
   await evaluate(`document.querySelector('#wall-toggle').click()`);
   await until(() => evaluate(`document.querySelectorAll('.host-card').length===4`),'fullscreen clears prior filters');
+  Object.assign(fixture.hosts[0], {ip:'192.168.6.23', checks:[], agent_port:9105, agent_token_set:true,
+    docker_monitor_enabled:true, website_monitor_enabled:true});
+  Object.assign(fixture.hosts[0].last, {
+    docker:{ok:null,label:'Docker 服務',detail:'Agent 無法提供資料'},
+    website:{ok:true,label:'網站 urc.landagent.com.tw',detail:'HTTP 204',latency_ms:10},
+  });
+  Object.assign(fixture.hosts[1], {ip:'192.168.6.44', docker_monitor_enabled:true, website_monitor_enabled:true});
+  Object.assign(fixture.hosts[1].last, {
+    status:'degraded', docker:{ok:true,label:'Docker 服務',detail:'systemd 回報 Docker 服務運行中'},
+    website:{ok:false,label:'網站 ai.tailan.com.tw',detail:'HTTP 503',latency_ms:12},
+  });
+  fixture.hosts[1].last.agent.metrics.services.push({name:'docker.service',status:'active'});
+  await evaluate(`window.__fixture=${JSON.stringify(fixture)}; window.fetch=(path,options)=>{
+    if(String(path)==='/api/state') return Promise.resolve(new Response(JSON.stringify(window.__fixture),{status:200}));
+    if(String(path)==='/api/hosts/fixture-0' && options?.method==='PUT'){
+      window.__editedHost=JSON.parse(options.body);
+      return Promise.resolve(new Response('{}',{status:200}));
+    }
+    return window.__originalFetch(path,options);
+  }`);
+  await until(() => evaluate(`document.querySelectorAll('.host-card')[0].textContent.includes('192.168.6.23')`), 'monitor fixture loaded');
+  assert.ok(await evaluate(`Array.from(document.querySelectorAll('.host-card')[0].querySelectorAll('.service-chip')).some(chip=>chip.textContent==='Docker 服務 · 無資料' && chip.classList.contains('unknown'))`), 'missing Docker data is distinct from failure');
+  assert.ok(await evaluate(`document.querySelectorAll('.host-card')[0].textContent.includes('網站 urc.landagent.com.tw · 正常')`));
+  assert.ok(await evaluate(`{const card=document.querySelectorAll('.host-card')[1]; card.textContent.includes('網站 ai.tailan.com.tw · 異常') && card.textContent.includes('Docker 服務 · 正常') && !card.textContent.includes('docker.service') && card.textContent.includes('ssh');}`));
+  await evaluate(`document.querySelectorAll('.host-card')[0].querySelector('.host-link').click()`);
+  assert.ok(await evaluate(`Array.from(document.querySelectorAll('#detail-content .check-row')).some(row=>row.textContent.includes('Docker 服務') && row.textContent.includes('無資料') && row.textContent.includes('Agent 無法提供資料'))`));
+  await evaluate(`document.querySelector('#detail-dialog').close(); document.querySelectorAll('.host-card')[1].querySelector('.host-link').click()`);
+  assert.ok(await evaluate(`{const text=document.querySelector('#detail-content').textContent; text.includes('HTTP 503') && text.includes('systemd 回報 Docker 服務運行中') && !text.includes('docker.service') && text.includes('ssh');}`));
+  await evaluate(`document.querySelector('#detail-dialog').close(); document.querySelectorAll('.host-card')[0].querySelector('.host-link').click(); document.querySelector('#edit-host').click(); document.querySelector('#host-name').value='Fixture renamed'; document.querySelector('#host-form').requestSubmit()`);
+  await until(() => evaluate(`window.__editedHost?.name==='Fixture renamed'`), 'ordinary edit of monitored host');
+  assert.ok(await evaluate(`!('docker_monitor_enabled' in window.__editedHost) && !('website_monitor_enabled' in window.__editedHost) && !('agent_token' in window.__editedHost)`));
+  await until(() => evaluate(`!document.querySelector('#host-dialog').open`), 'ordinary edit saved');
   await evaluate(`window.fetch=()=>Promise.reject(new TypeError('simulated offline'))`);
   await until(() => evaluate(`!document.querySelector('#state-error').hidden`),'connection failure warning');
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('#state-error')).display!=='none'`),true,'stale-data warning remains visible in wall mode');
   assert.deepEqual(errors, []);
-  console.log('PASS: persisted adjustable frequency/timer/mobile, host/scan workflows, Gmail settings/secret preservation/clearing/test queue, metrics board, safe rendering, missing agent, service failure, filters, details, list toggle, mobile and four-host desktop wall');
+  console.log('PASS: host/scan and settings workflows, Gmail, metrics board, separate Docker/website status and host editing, safe rendering, filters, details, mobile and desktop wall');
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {
     try { console.error('Browser diagnostic:', await evaluate(`JSON.stringify({hostError:document.querySelector('#host-form-error').textContent,scanError:document.querySelector('#scan-error').textContent,scanStatus:document.querySelector('#scan-status').textContent,scanRange:document.querySelector('#scan-range').value,scanPorts:document.querySelector('#scan-ports').value})`)); } catch {}

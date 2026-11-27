@@ -202,6 +202,21 @@
     $('empty-add').hidden = !model.loaded || isFiltered;
   }
 
+  function displayChecks(host) {
+    const last = host.last || {};
+    return [...(Array.isArray(last.checks) ? last.checks : []), ...[last.docker, last.website].filter(Boolean)];
+  }
+
+  function displayServices(host) {
+    const services = host.last?.agent?.metrics?.services;
+    return Array.isArray(services) ? services.filter((service) => !host.last.docker || service.name !== 'docker.service') : [];
+  }
+
+  function checkState(check) {
+    return check.ok === true ? { tone: 'good', label: '正常' } :
+      check.ok === false ? { tone: 'bad', label: '異常' } : { tone: 'unknown', label: '無資料' };
+  }
+
   function renderBoard(hosts) {
     const key = focusKey();
     const cards = document.createDocumentFragment();
@@ -245,14 +260,14 @@
       services.append(serviceSummary);
       let goodCount = 0, badCount = 0, unknownCount = 0;
       const tags = el('div', 'card-service-tags');
-      const checks = Array.isArray(last.checks) ? last.checks : [];
-      checks.forEach((check) => {
-        const tag = el('span', `service-chip ${check.ok === true ? 'good' : 'bad'}`, `${check.label || check.type || '服務'} · ${check.ok === true ? '正常' : '異常'}`);
-        if (check.ok === true) goodCount++; else badCount++;
+      displayChecks(host).forEach((check) => {
+        const { tone, label } = checkState(check);
+        const tag = el('span', `service-chip ${tone}`, `${check.label || check.type || '服務'} · ${label}`);
+        if (tone === 'good') goodCount++; else if (tone === 'bad') badCount++; else unknownCount++;
         tag.title = check.detail || '';
         tags.append(tag);
       });
-      (Array.isArray(metrics.services) ? metrics.services : []).forEach((service) => {
+      displayServices(host).forEach((service) => {
         const status = String(service.status || '未知');
         const good = ['active', 'running'].includes(status.toLowerCase());
         const unknown = ['unknown', '未知', ''].includes(status.toLowerCase());
@@ -499,16 +514,20 @@
     content.append(trend);
 
     const checksSection = section('服務檢查');
-    const checks = Array.isArray(host.last?.checks) ? host.last.checks : [];
+    const checks = displayChecks(host);
     if (checks.length) {
       const list = el('div', 'check-list');
       checks.forEach((check) => {
         const row = el('div', 'check-row');
-        const state = el('span', `check-status${check.ok ? '' : ' failed'}`);
-        state.append(icon(check.ok ? 'check' : 'alert'));
-        state.setAttribute('aria-label', check.ok ? '通過' : '失敗');
+        const { tone, label } = checkState(check);
+        const state = el('span', `check-status${tone === 'bad' ? ' failed' : tone === 'unknown' ? ' check-unknown' : ''}`);
+        if (tone !== 'unknown') state.append(icon(tone === 'good' ? 'check' : 'alert'));
+        else state.textContent = '—';
+        state.setAttribute('aria-hidden', 'true');
         const info = el('div', 'check-info');
-        info.append(el('div', 'check-label', check.label || String(check.type || '檢查').toUpperCase()), el('div', 'check-detail', check.detail || (check.ok ? '檢查通過' : '檢查未通過')));
+        const title = check.label || String(check.type || '檢查').toUpperCase();
+        info.append(el('div', 'check-label', `${title} · ${label}`),
+          el('div', 'check-detail', check.detail || label));
         row.append(state, info, latency(check.latency_ms));
         list.append(row);
       });
@@ -552,10 +571,11 @@
         });
         agentSection.append(disks);
       }
-      if (Array.isArray(metrics.services) && metrics.services.length) {
+      const serviceItems = displayServices(host);
+      if (serviceItems.length) {
         const services = section('系統服務');
         const list = el('div', 'service-list');
-        metrics.services.forEach((service) => {
+        serviceItems.forEach((service) => {
           const row = el('div', 'service-row');
           row.append(el('span', '', service.name), el('span', '', service.status || '未知'));
           list.append(row);
